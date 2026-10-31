@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sidekick Live</title>
+<meta name="description" content="Sidekick Live: a live lesson companion for large Zoom and Class sessions.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎤</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- Invisible corner: triple-click opens Teacher Mode -->
+<div id="secret-corner" aria-hidden="true"></div>
+
+<!-- ============ STUDENT: JOIN ============ -->
+<main id="screen-join" class="screen">
+  <div class="join-card">
+    <h1 class="brand"><span class="brand-mic" aria-hidden="true">🎤</span> Sidekick Live</h1>
+    <p class="lead">Type the room code your teacher shows you.</p>
+    <form id="join-form" autocomplete="off" novalidate>
+      <label for="join-code">Room code</label>
+      <input id="join-code" class="code-input" maxlength="4" inputmode="text" autocapitalize="characters" spellcheck="false" placeholder="ABCD" required>
+      <div class="row-2">
+        <div>
+          <label for="join-first">First name</label>
+          <input id="join-first" maxlength="20" autocomplete="off" spellcheck="false" required>
+        </div>
+        <div class="initial-wrap">
+          <label for="join-initial">Last initial</label>
+          <input id="join-initial" maxlength="1" autocapitalize="characters" spellcheck="false" required>
+        </div>
+      </div>
+      <div class="toggles">
+        <label class="check"><input type="checkbox" id="pref-big"> Big buttons</label>
+        <label class="check"><input type="checkbox" id="pref-read"> Read aloud buttons</label>
+      </div>
+      <p id="join-error" class="error" role="alert"></p>
+      <button type="submit" id="join-btn" class="btn btn-primary btn-wide">Join class</button>
+    </form>
+  </div>
+</main>
+
+<!-- ============ STUDENT: IN CLASS ============ -->
+<main id="screen-student" class="screen" hidden>
+  <header class="st-bar">
+    <span id="st-name" class="st-name"></span>
+    <span id="st-conn" class="conn-pill" data-state="ok">Connected</span>
+    <span id="st-stars" class="stars" title="Class stars" aria-live="polite"></span>
+  </header>
+  <section id="st-stage" class="st-stage" aria-live="polite"></section>
+  <nav id="st-review" class="st-review" hidden>
+    <button class="btn" id="st-prev">◀ Back</button>
+    <button class="btn" id="st-follow">📍 Back to teacher</button>
+    <button class="btn" id="st-next">Next ▶</button>
+  </nav>
+  <footer class="st-dock">
+    <button id="st-vol" class="vol-toggle" aria-pressed="false">
+      <span class="vol-box" aria-hidden="true"></span>
+      <span class="vol-text">I'd like to share on the mic 🎤</span>
+    </button>
+    <div class="rx-row" role="group" aria-label="Reactions">
+      <button class="rx" data-e="👏" aria-label="Clap">👏</button>
+      <button class="rx" data-e="💡" aria-label="Great idea">💡</button>
+      <button class="rx" data-e="👍" aria-label="I agree">👍</button>
+      <button class="rx" data-e="❤️" aria-label="Love it">❤️</button>
+      <button class="rx" data-e="🤩" aria-label="Wow">🤩</button>
+    </div>
+    <div id="st-rx-counts" class="rx-counts" aria-live="off"></div>
+  </footer>
+</main>
+
+<!-- ============ TEACHER: DASHBOARD ============ -->
+<main id="screen-dash" class="screen" hidden>
+  <header class="dash-bar">
+    <h1 class="brand small"><span aria-hidden="true">🎤</span> Sidekick Live <span class="role">Teacher</span></h1>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="lessons" class="tab" aria-selected="true">Lessons</button>
+      <button role="tab" data-tab="sets" class="tab">Question sets</button>
+      <button role="tab" data-tab="report" class="tab">Report</button>
+      <button role="tab" data-tab="settings" class="tab">Settings</button>
+    </nav>
+    <button class="btn btn-ghost" id="dash-exit">Exit Teacher Mode</button>
+  </header>
+  <div id="resume-banner" class="banner" hidden></div>
+  <section id="tab-lessons" class="tab-panel"></section>
+  <section id="tab-sets" class="tab-panel" hidden></section>
+  <section id="tab-report" class="tab-panel" hidden></section>
+  <section id="tab-settings" class="tab-panel" hidden></section>
+</main>
+
+<!-- ============ TEACHER: LESSON BUILDER ============ -->
+<main id="screen-builder" class="screen" hidden>
+  <header class="dash-bar">
+    <button class="btn btn-ghost" id="bld-back">◀ Lessons</button>
+    <h1 id="bld-title" class="bld-title"></h1>
+    <button class="btn btn-primary" id="bld-start">Start session</button>
+  </header>
+  <div class="bld-tools">
+    <label class="btn"><input type="file" id="bld-files" accept="image/*,.pdf,application/pdf" multiple hidden>Add slides (images or PDF)</label>
+    <button class="btn" id="bld-add-text">Add text slide</button>
+    <button class="btn" id="bld-add-q">Add questions</button>
+    <button class="btn" id="bld-add-check">Add check-in</button>
+    <span id="bld-status" class="muted" aria-live="polite"></span>
+  </div>
+  <ol id="bld-list" class="bld-list"></ol>
+</main>
+
+<!-- ============ TEACHER: HOST / PRESENTER ============ -->
+<main id="screen-host" class="screen" hidden>
+  <header class="host-bar">
+    <div class="join-info">
+      <span class="muted">Join at</span> <strong id="h-url"></strong>
+      <span class="muted">code</span> <strong id="h-code" class="room-code"></strong>
+    </div>
+    <span id="h-net" class="conn-pill" data-state="ok">Online</span>
+    <span id="h-count" class="count-pill">0 students</span>
+    <span id="h-deck" class="count-pill"></span>
+    <label class="check small"><input type="checkbox" id="h-safe"> Projector-safe</label>
+    <button class="btn btn-ghost" id="h-end">End session</button>
+  </header>
+  <div class="host-body">
+    <section class="host-stage-wrap">
+      <div id="h-stage" class="host-stage"></div>
+      <div class="host-nav">
+        <button class="btn" id="h-prev">◀ Back</button>
+        <span id="h-pos" class="muted"></span>
+        <button class="btn btn-primary" id="h-next">Next ▶</button>
+      </div>
+    </section>
+    <aside class="host-side">
+      <div class="side-block">
+        <h2>Up next</h2>
+        <div id="h-next-preview" class="next-preview"></div>
+        <div id="h-notes" class="notes"></div>
+      </div>
+      <div class="side-block tools-grid">
+        <button class="tool tool-spin" id="h-spin-open">🎤 Share spinner <span id="h-vol-count" class="badge">0</span></button>
+        <button class="tool" id="h-spot-open">🔦 Spotlight</button>
+        <button class="tool" id="h-pause" aria-pressed="false">⏸ Pause screens</button>
+        <button class="tool" id="h-look" aria-pressed="false">👀 Look at Class</button>
+        <button class="tool" id="h-review" aria-pressed="false">📖 Unlock review</button>
+        <button class="tool" id="h-pointer" aria-pressed="false">👆 Pointer</button>
+      </div>
+      <div class="side-block">
+        <h2>Class</h2>
+        <div id="h-live" class="live-line"></div>
+        <div id="h-rx" class="rx-counts"></div>
+      </div>
+      <details class="side-block" id="h-roster-wrap" open>
+        <summary><h2>Roster</h2></summary>
+        <ul id="h-roster" class="roster"></ul>
+      </details>
+    </aside>
+  </div>
+</main>
+
+<!-- ============ OVERLAYS ============ -->
+<div id="spin-overlay" class="overlay" hidden>
+  <div class="spin-card" role="dialog" aria-modal="true" aria-labelledby="spin-title">
+    <h2 id="spin-title">Share spinner</h2>
+    <div id="spin-visual" class="spin-visual"></div>
+    <div id="spin-result" class="spin-result" aria-live="assertive"></div>
+    <div id="spin-host-controls" class="spin-controls" hidden>
+      <div class="spin-opts">
+        <label class="check small"><input type="radio" name="spin-mode" value="round" checked> Everyone gets a turn first</label>
+        <label class="check small"><input type="radio" name="spin-mode" value="weighted"> Weighted (all stay in)</label>
+        <label class="check small"><input type="checkbox" id="spin-headsup" checked> 3-second "get ready"</label>
+        <label class="check small"><input type="checkbox" id="spin-showpool"> Show volunteer names to class</label>
+      </div>
+      <div id="spin-pool" class="spin-pool"></div>
+      <form id="spin-add" class="spin-add">
+        <input id="spin-add-name" maxlength="24" placeholder="Add a name (from Zoom/Class)" aria-label="Add a name">
+        <button class="btn" type="submit">Add</button>
+      </form>
+      <div class="spin-buttons">
+        <button class="btn btn-sun" id="spin-go">Spin</button>
+        <button class="btn" id="spin-skip" hidden>Skip (not here)</button>
+        <button class="btn" id="spin-reset">New round</button>
+        <button class="btn btn-ghost" id="spin-close">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="spot-overlay" class="overlay" hidden>
+  <div class="panel-card" role="dialog" aria-modal="true" aria-labelledby="spot-title">
+    <h2 id="spot-title">Spotlight answers</h2>
+    <p class="muted">Pick typed answers to show the class. Only what you choose is shown.</p>
+    <div id="spot-list" class="spot-list"></div>
+    <div class="spin-opts">
+      <label class="check small"><input type="radio" name="spot-mode" value="name" checked> Show first name</label>
+      <label class="check small"><input type="radio" name="spot-mode" value="anon"> Anonymous</label>
+    </div>
+    <div class="spin-buttons">
+      <button class="btn btn-primary" id="spot-show">Show to class</button>
+      <button class="btn" id="spot-hide">Hide spotlight</button>
+      <button class="btn btn-ghost" id="spot-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="pin-overlay" class="overlay" hidden>
+  <form class="panel-card pin-card" id="pin-form" role="dialog" aria-modal="true" aria-labelledby="pin-title">
+    <h2 id="pin-title">Teacher Mode</h2>
+    <label for="pin-input">Teacher PIN</label>
+    <input id="pin-input" type="password" inputmode="numeric" autocomplete="off" maxlength="12">
+    <p id="pin-error" class="error" role="alert"></p>
+    <div class="spin-buttons">
+      <button class="btn btn-primary" type="submit">Open</button>
+      <button class="btn btn-ghost" type="button" id="pin-cancel">Cancel</button>
+    </div>
+  </form>
+</div>
+
+<div id="modal-overlay" class="overlay" hidden>
+  <div class="panel-card" id="modal-card" role="dialog" aria-modal="true"></div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
