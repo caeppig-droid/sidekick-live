@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sidekick Live</title>
-<meta name="description" content="Sidekick Live: a live lesson companion for large Zoom and Class sessions.">
+<meta name="description" content="Sidekick Live: a live lesson companion for large LiveLesson (Zoom) sessions.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎤</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -48,6 +48,8 @@
   <header class="st-bar">
     <span id="st-name" class="st-name"></span>
     <span id="st-conn" class="conn-pill" data-state="ok">Connected</span>
+    <span id="st-timer" class="timer-pill" hidden aria-live="off"></span>
+    <span id="st-score" class="score-pill" hidden></span>
     <span id="st-stars" class="stars" title="Class stars" aria-live="polite"></span>
   </header>
   <section id="st-stage" class="st-stage" aria-live="polite"></section>
@@ -57,7 +59,7 @@
     <button class="btn" id="st-next">Next ▶</button>
   </nav>
   <footer class="st-dock">
-    <button id="st-vol" class="vol-toggle" aria-pressed="false">
+    <button id="st-vol" class="vol-toggle" aria-pressed="false" hidden>
       <span class="vol-box" aria-hidden="true"></span>
       <span class="vol-text">I'd like to share on the mic 🎤</span>
     </button>
@@ -102,6 +104,8 @@
     <label class="btn"><input type="file" id="bld-files" accept="image/*,.pdf,application/pdf" multiple hidden>Add slides (images or PDF)</label>
     <button class="btn" id="bld-add-text">Add text slide</button>
     <button class="btn" id="bld-add-q">Add questions</button>
+    <button class="btn" id="bld-add-draw">Add drawing question</button>
+    <button class="btn" id="bld-add-dots">Add dot map</button>
     <button class="btn" id="bld-add-check">Add check-in</button>
     <span id="bld-status" class="muted" aria-live="polite"></span>
   </div>
@@ -118,6 +122,8 @@
     <span id="h-net" class="conn-pill" data-state="ok">Online</span>
     <span id="h-count" class="count-pill">0 students</span>
     <span id="h-deck" class="count-pill"></span>
+    <button id="h-timer" class="timer-pill" hidden title="Open the timer"></button>
+    <button id="h-score" class="score-pill" hidden title="Open the scoreboard"></button>
     <label class="check small"><input type="checkbox" id="h-safe"> Projector-safe</label>
     <button class="btn btn-ghost" id="h-end">End session</button>
   </header>
@@ -138,11 +144,12 @@
       </div>
       <div class="side-block tools-grid">
         <button class="tool tool-spin" id="h-spin-open">🎤 Share spinner <span id="h-vol-count" class="badge">0</span></button>
+        <button class="tool" id="h-signup" aria-pressed="false">✋ Open share sign-up</button>
+        <button class="tool" id="h-tools">🧰 Timer, dice &amp; more</button>
         <button class="tool" id="h-spot-open">🔦 Spotlight</button>
         <button class="tool" id="h-pause" aria-pressed="false">⏸ Pause screens</button>
-        <button class="tool" id="h-look" aria-pressed="false">👀 Look at Class</button>
+        <button class="tool" id="h-look" aria-pressed="false">👀 Look at LL</button>
         <button class="tool" id="h-review" aria-pressed="false">📖 Unlock review</button>
-        <button class="tool" id="h-pointer" aria-pressed="false">👆 Pointer</button>
       </div>
       <div class="side-block">
         <h2>Class</h2>
@@ -172,7 +179,7 @@
       </div>
       <div id="spin-pool" class="spin-pool"></div>
       <form id="spin-add" class="spin-add">
-        <input id="spin-add-name" maxlength="24" placeholder="Add a name (from Zoom/Class)" aria-label="Add a name">
+        <input id="spin-add-name" maxlength="24" placeholder="Add a name (from LL)" aria-label="Add a name">
         <button class="btn" type="submit">Add</button>
       </form>
       <div class="spin-buttons">
@@ -199,6 +206,28 @@
       <button class="btn" id="spot-hide">Hide spotlight</button>
       <button class="btn btn-ghost" id="spot-close">Close</button>
     </div>
+  </div>
+</div>
+
+<div id="tools-overlay" class="overlay" hidden>
+  <div class="panel-card tools-card" role="dialog" aria-modal="true" aria-labelledby="tools-title">
+    <div class="tools-head"><h2 id="tools-title">Classroom tools</h2><button class="btn btn-ghost" id="tools-close">Close</button></div>
+    <nav class="tabs" id="tools-tabs" role="tablist">
+      <button class="tab" role="tab" data-tool="timer">⏱ Timer</button>
+      <button class="tab" role="tab" data-tool="dice">🎲 Dice</button>
+      <button class="tab" role="tab" data-tool="score">🏆 Scoreboard</button>
+      <button class="tab" role="tab" data-tool="wheel">🎡 Random wheel</button>
+    </nav>
+    <div id="tools-body" class="tools-body"></div>
+  </div>
+</div>
+
+<div id="tool-overlay" class="overlay" hidden>
+  <div class="spin-card" role="dialog" aria-modal="true" aria-labelledby="tool-title">
+    <h2 id="tool-title"></h2>
+    <div id="tool-visual" class="spin-visual"></div>
+    <div id="tool-result" class="spin-result" aria-live="assertive"></div>
+    <button class="btn btn-ghost" id="tool-hide">Back to the lesson</button>
   </div>
 </div>
 

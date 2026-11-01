@@ -25,7 +25,7 @@ const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.mi
 const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 const KEYS = {
   sets: NS + 'sets', report: NS + 'report', pinLock: NS + 'pinlock', prefs: NS + 'prefs',
-  settings: NS + 'settings', host: NS + 'hostsession', student: NS + 'student', teacherOk: NS + 'teacherok'
+  settings: NS + 'settings', wheels: NS + 'wheels', host: NS + 'hostsession', student: NS + 'student', teacherOk: NS + 'teacherok'
 };
 const IDB_NAME = NS + 'db';
 const QS = new URLSearchParams(location.search);
@@ -179,7 +179,7 @@ const TYPE_ALIASES = {
   'match': 'match', 'matching': 'match',
   'sort': 'sort', 'sorting': 'sort', 'categorize': 'sort'
 };
-const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True/False', type: 'Type the answer', wordbank: 'Word bank', order: 'Put in order', match: 'Match', sort: 'Sort' };
+const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True/False', type: 'Type the answer', wordbank: 'Word bank', order: 'Put in order', match: 'Match', sort: 'Sort', draw: 'Drawing', dots: 'Dot map' };
 function pairs(q) { return q.choices.map(c => { const i = c.indexOf('='); return [c.slice(0, i).trim(), c.slice(i + 1).trim()]; }); }
 function cells(list) { return (list || []).map(x => cleanText(x, 160).trim()).filter(Boolean).slice(0, 6); }
 
@@ -343,7 +343,8 @@ function questionsFromCSV(text) {
   const rows = parseCSV(text); if (!rows.length) throw new Error('The file is empty.');
   const head = rows[0].map(h => norm(h));
   let ti = 0, qi = 1, ai = [2, 3, 4, 5, 6, 7], ri = -1, start = 0;
-  if (head.includes('type') && head.includes('question')) {
+  if (!(head.includes('type') && head.includes('question'))) { const e = new Error('incorrect format'); e.format = true; throw e; }
+  {
     ti = head.indexOf('type'); qi = head.indexOf('question'); start = 1;
     const found = [1, 2, 3, 4, 5, 6].map(n => head.indexOf('answer ' + n));
     if (found.some(i => i >= 0)) ai = found.filter(i => i >= 0);
@@ -454,7 +455,8 @@ const S = {
   active: false, leaving: false, peer: null, conn: null, connecting: false, rtimer: null, backoff: 0,
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
-  lastRx: 0, pendingAns: null, ackQid: null, stars: 0
+  lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null
 };
 
 function studentJoin(room, first, initial, token) {
@@ -546,7 +548,9 @@ function onHostMsg(m) {
       break;
     case 'view':
       S.view = m; if (!m.review) S.reviewIdx = null;
-      if (S.pendingAns && !(m.k === 'q' && m.q.qid === S.pendingAns.qid && m.phase === 'open')) S.pendingAns = null;
+      if (m.k === 'slide') S.ink = { iid: m.sid, strokes: Array.isArray(m.ink) ? m.ink : [] };
+      if (S.pendingAns && !(viewQid(m) === S.pendingAns.qid && m.phase === 'open')) S.pendingAns = null;
+      if (!m.signup && S.vol) { S.vol = false; renderVol(); }
       renderStudent(); break;
     case 'p': sendHost({ t: 'pg', h: document.hidden }); break;
     case 'ack': if (S.pendingAns && S.pendingAns.qid === m.qid) S.pendingAns = null; S.ackQid = m.qid; updateSentNote(); break;
@@ -558,7 +562,19 @@ function onHostMsg(m) {
     case 'you': studentYou(); break;
     case 'spot': S.spot = m.items || null; renderStudent(); break;
     case 'pt': showPointer($('#st-stage'), m.x, m.y); break;
+    case 'ink': onInkMsg(m); break;
+    case 'dm': onDotShare(m); break;
+    case 'lz': if (S.view && S.view.k === 'slide' && S.reviewIdx == null) showLaser($('#st-stage'), m); break;
+    case 'tm': onTimer(m); break;
+    case 'sb': onScore(m); break;
+    case 'dice': case 'wheel': case 'toolclose': studentTool(m); break;
   }
+}
+function viewQid(v) { return v ? (v.k === 'q' ? v.q.qid : (v.k === 'draw' || v.k === 'dots') ? v.qid : null) : null; }
+function viewMedia(v) { return v ? (v.k === 'slide' ? v.sid : v.k === 'q' ? v.q.img : (v.k === 'draw' || v.k === 'dots') ? v.bg : null) : null; }
+function mediaBox(mid) {
+  const u = mediaUrl(mid);
+  return el('div', { class: 'q-img', 'data-mid': mid }, u ? el('img', { src: u, alt: 'Question picture' }) : el('div', { class: 'slide-loading' }, 'Loading picture…'));
 }
 function onSlideChunk(m) {
   const map = m.p ? S.previews : S.slides;
@@ -571,7 +587,10 @@ function onSlideChunk(m) {
     if (!m.p) { const pv = S.previews.get(m.sid); if (pv && pv.url) { setTimeout(() => URL.revokeObjectURL(pv.url), 5000); S.previews.delete(m.sid); } }
     else if (S.slides.get(m.sid)?.url) return;   // full one already here
     const v = S.view;
-    if (v && ((v.k === 'slide' && v.sid === m.sid) || (S.reviewIdx != null && S.deck[S.reviewIdx] === m.sid))) renderStudent();
+    if (S.reviewIdx != null && S.deck[S.reviewIdx] === m.sid) { renderStudent(); return; }
+    if (viewMedia(v) !== m.sid) return;
+    if (v.k === 'q') document.querySelectorAll('[data-mid="' + m.sid + '"]').forEach(b => b.replaceWith(mediaBox(m.sid)));   // keep the student's answer in progress
+    else renderStudent();
   }
 }
 
@@ -591,16 +610,17 @@ function renderStudent() {
   const stage = $('#st-stage'); stage.replaceChildren();
   const v = S.view;
   $('#st-review').hidden = !(v && v.review && !v.paused && !v.look);
+  $('#st-vol').hidden = !(v && v.signup && v.k !== 'end');
   if (!v) {
     if (!S.everConnected && S.firstTimer && performanceWaitedLong()) {
       stage.append(msgCard('📡', 'Still trying to reach your class',
-        'Your internet may be blocking the connection. Keep this page open — it keeps trying. You can still join in on Class: use reactions and raise your hand, and your teacher can add you to the share spinner.'));
+        'Your internet may be blocking the connection. Keep this page open — it keeps trying. You can still join in on LL (LiveLesson): use reactions and raise your hand, and your teacher can add you to the share spinner.'));
     } else stage.append(msgCard('⏳', 'Joining your class…', 'Hang on a moment.'));
     return;
   }
   if (v.k === 'end') { stage.append(msgCard('👋', 'Class is over!', 'Great work today. You can close this page.')); S.leaving = true; ssDel(KEYS.student); try { S.peer && S.peer.destroy(); } catch { /* ignore */ } setConn('ok', 'Finished'); return; }
   if (v.paused) { stage.append(msgCard('👀', 'Eyes on your teacher', 'Your screen will come back soon.')); return; }
-  if (v.look) { stage.append(msgCard('📺', 'Look at Class', 'Your teacher is showing something in Class right now.')); return; }
+  if (v.look) { stage.append(msgCard('📺', 'Look at LL', 'Your teacher is showing something in LiveLesson right now.')); return; }
 
   if (v.review && S.reviewIdx != null && S.deck.length) {
     stage.append(slideEl(S.deck[S.reviewIdx]));
@@ -608,10 +628,14 @@ function renderStudent() {
   } else {
     switch (v.k) {
       case 'wait': stage.append(msgCard('⏳', 'You’re in!', 'Waiting for your teacher…')); break;
-      case 'slide':
-        stage.append(slideEl(v.sid, v.read));
+      case 'slide': {
+        const fr = slideEl(v.sid, v.read); stage.append(fr);
+        if (fr.querySelector('img')) attachStudentInk(fr);
         if (prefs.read && v.read) stage.append(readBtn(() => v.read));
         break;
+      }
+      case 'draw': stage.append(buildDrawResponse(v)); break;
+      case 'dots': stage.append(buildDotMap(v)); break;
       case 'text': {
         const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
         stage.append(card);
@@ -627,7 +651,16 @@ function renderStudent() {
 function performanceWaitedLong() { return !S.everConnected && (Date.now() - (S.joinStart || Date.now())) > 19000; }
 function spotCard(items) {
   return el('div', { class: 'spot-card' }, el('h3', null, '🔦 Spotlight'),
-    items.map(i => el('div', { class: 'spot-item' }, i.by ? el('span', { class: 'by', text: i.by }) : el('span', { class: 'by', text: 'A classmate' }), i.text)));
+    el('div', { class: items.some(i => i.d) ? 'spot-draws' : '' }, items.map(i => {
+      const by = el('span', { class: 'by', text: i.by || 'A classmate' });
+      if (i.d) {
+        const c = document.createElement('canvas'), u = mediaUrl(i.bg);
+        let img = null; if (u) { img = new Image(); img.src = u; img.onload = () => renderDrawing(c, i.d.s, img, i.aspect, 520); }
+        renderDrawing(c, i.d.s, img, i.aspect, 520);
+        return el('figure', { class: 'spot-item spot-draw' }, c, by);
+      }
+      return el('div', { class: 'spot-item' }, by, i.text);
+    })));
 }
 function showPointer(container, x, y) {
   const img = container.querySelector('.slide-frame img'); if (!img) return;
@@ -658,13 +691,14 @@ function speakableQ(q) {
   return t;
 }
 function updateSentNote() {
-  const n = $('#q-sent'); if (!n || !S.view || S.view.k !== 'q') return;
-  if (S.ackQid === S.view.q.qid) n.textContent = 'Answer sent ✓ You can change it until results are shown.';
+  const n = $('#q-sent'); if (!n || !viewQid(S.view)) return;
+  if (S.ackQid === viewQid(S.view)) n.textContent = S.view.k === 'dots' ? 'Your dot is in ✓ Tap somewhere else to move it.' : S.view.k === 'draw' ? 'Drawing sent ✓ You can change it and send again.' : 'Answer sent ✓ You can change it until results are shown.';
 }
 function buildStudentQ(v) {
   const q = v.q, locked = v.phase !== 'open';
   const card = el('div', { class: 'q-card' });
   card.append(el('div', { class: 'q-text', text: q.type === 'wordbank' ? 'Fill in the blanks.' : q.text }));
+  if (q.img) card.append(mediaBox(q.img));
   if (prefs.read) card.append(readBtn(() => q.read || speakableQ(q)));
   const body = el('div'); card.append(body);
   let getAnswer = () => null, complete = () => false;
@@ -817,22 +851,23 @@ function studentSpin(m) {
     vis.replaceChildren(el('div', { class: 'mystery', 'aria-hidden': 'true' }, '🎤'));
     const b = el('button', { class: 'vol-toggle', 'aria-pressed': String(S.vol), onclick: () => { toggleVol(); b.setAttribute('aria-pressed', String(S.vol)); } },
       el('span', { class: 'vol-box', 'aria-hidden': 'true' }), el('span', null, 'I’d like to share on the mic 🎤'));
-    res.replaceChildren(el('span', { class: 'sub' }, 'The share spinner is open.'), b, hideBtn());
+    res.replaceChildren(el('span', { class: 'sub' }, 'The share spinner is open.'), S.view && S.view.signup ? b : null, hideBtn());
   } else if (m.ph === 'skip') {
     res.replaceChildren(el('span', { class: 'sub' }, 'Let’s spin again!'));
   }
 }
 function hideBtn() { return el('div', null, el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { $('#spin-overlay').hidden = true; } }, 'Back to the lesson')); }
 function toggleVol() {
+  if (!S.view || !S.view.signup) { toast('Share sign-up isn’t open right now.'); return; }
   S.vol = !S.vol; renderVol();
   if (!sendHost({ t: 'vol', on: S.vol })) { S.vol = !S.vol; renderVol(); toast('Not connected yet — try again in a moment.'); }
   else toast(S.vol ? 'You’re on the share list 🎤' : 'You’re off the share list.');
 }
-function youCard() { return el('div', { class: 'you-card' }, 'That’s you! 🎤 Go to Class and unmute when your teacher says. Come back here after.'); }
+function youCard() { return el('div', { class: 'you-card' }, 'That’s you! 🎤 Go to LL and unmute when your teacher says. Come back here after.'); }
 function studentYou() {
   S.you = true;
   if (S.spinDone) $('#spin-result').append(youCard());
-  if (prefs.read) speak('That is you! Go to Class and unmute when your teacher says.');
+  if (prefs.read) speak('That is you! Go to LiveLesson and unmute when your teacher says.');
 }
 
 /* =====================================================================
@@ -907,29 +942,55 @@ async function startHost(lesson, snap) {
     spotlight: null, pub: {}, rx: {}, rxDirty: false, liveDirty: true, rosterDirty: true, deckDirty: true, reportDirty: false,
     slideData: new Map(), sids: [], urls: new Map(), rr: 0,
     rate: settings.rateKB * 1024, bucket: 0, lastTick: now, lastLive: 0, lastPing: now, lastRoster: 0, lastSave: 0,
-    report: null, netState: 'connecting', ended: false, ticker: null, reconnTimer: null
+    report: null, netState: 'connecting', ended: false, ticker: null, reconnTimer: null,
+    signup: snap ? !!snap.signup : false, ink: snap && snap.ink ? snap.ink : {}, tool: null, inkColor: INK_COLORS[0], inkCanvas: null,
+    timer: Object.assign({ total: 0, left: 0, run: false, at: now, chime: true, stChime: false }, snap && snap.timer ? { ...snap.timer, run: false } : {}),
+    sb: snap && snap.sb ? snap.sb : { show: false, autoStar: false, teams: [{ n: 'Teacher', s: 0 }, { n: 'Students', s: 0 }] },
+    dice: { n: 1, custom: false, text: 'add\nsubtract\nmultiply' }, wheel: { listId: null, remove: false, used: {} },
+    mediaIds: [], imgCache: {}, galleryDirty: false, lastGallery: 0,
+    dotState: snap && snap.dotState ? snap.dotState : {}, dotsDirty: false, lastDots: 0, dotPaint: null
   };
   H.report = snap ? (lsGet(KEYS.report, null) || newReport(lesson, H.code)) : newReport(lesson, H.code);
+  H.report.lessonId = lesson.id;
   if (snap) for (const s of snap.students || []) {
     const st = mkStudent(s.id, s.token, s.name); st.vol = !!s.vol; st.shared = s.shared || 0;
     H.students.set(st.id, st); H.byToken.set(st.token, st);
   }
   for (const it of H.items) {
-    if (it.kind !== 'slide' || !it.blob) continue;
-    const buf = new Uint8Array(await it.blob.arrayBuffer());
-    let pv = null; try { pv = await makePreview(it.blob); } catch { /* preview is optional */ }
+    const mid = mediaIdFor(it), blob = mediaBlob(it); if (!mid || !blob) continue;
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    let pv = null; try { pv = await makePreview(blob); } catch { /* preview is optional */ }
     const pbuf = pv ? new Uint8Array(await pv.arrayBuffer()) : null;
-    H.slideData.set(it.id, { buf, size: buf.length, mime: it.blob.type || 'image/webp', pbuf, psize: pbuf ? pbuf.length : 0, pmime: pv ? pv.type : '' });
-    H.urls.set(it.id, URL.createObjectURL(it.blob));
-    H.sids.push(it.id);
+    H.slideData.set(mid, { buf, size: buf.length, mime: blob.type || 'image/webp', pbuf, psize: pbuf ? pbuf.length : 0, pmime: pv ? pv.type : '' });
+    H.urls.set(mid, URL.createObjectURL(blob));
+    H.mediaIds.push(mid); if (it.kind === 'slide') H.sids.push(mid);
   }
+  if (H.timer.total && H.timer.left <= 0) H.timer.total = 0;
   document.body.classList.remove('safe'); $('#h-safe').checked = false;
   show('screen-host');
   updateHostHeader();
   hostConnectPeer(0);
   H.ticker = makeTicker(250, hostTick);
   const it = currentItem(); if (it && it.kind === 'q') { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
+  setSignup(H.signup, true); updateHostScore(); updateHostTimer();
   renderHostStage(); renderHostSide(); saveReport(); saveHostSnap();
+}
+function mediaIdFor(it) {
+  if (!it) return null;
+  if (it.kind === 'slide') return it.blob ? it.id : null;
+  if (it.kind === 'q') return it.img ? 'qi-' + it.id : null;
+  if (it.kind === 'draw') return it.bg ? 'db-' + it.id : null;
+  if (it.kind === 'dots') return it.bg ? 'dm-' + it.id : null;
+  return null;
+}
+function mediaBlob(it) { return it.kind === 'slide' ? it.blob : it.kind === 'q' ? it.img : (it.kind === 'draw' || it.kind === 'dots') ? it.bg : null; }
+function setSignup(on, quiet) {
+  if (!H) return;
+  H.signup = !!on;
+  if (!on) for (const st of H.students.values()) st.vol = false;
+  const b = $('#h-signup'); b.setAttribute('aria-pressed', String(H.signup)); b.textContent = H.signup ? '✋ Close share sign-up' : '✋ Open share sign-up';
+  broadcastView(); renderSpinPool(); renderHostSide(); saveHostSnap();
+  if (!quiet) toast(H.signup ? 'Share sign-up is open on student screens.' : 'Share sign-up closed. Ticks cleared.');
 }
 function mkStudent(id, token, name) {
   return { id, token, name, conn: null, online: false, lastSeen: 0, hidden: false, quiet: false, vol: false, shared: 0, have: new Set(), sent: new Map(), havePrev: new Set(), sentPrev: new Map(), lastRx: 0 };
@@ -1017,7 +1078,7 @@ function hostOnData(conn, m) {
     case 'vis': st.hidden = !!m.h; H.rosterDirty = true; break;
     case 'ans': hostAnswer(st, m); break;
     case 'ck': hostCheckin(st, m); break;
-    case 'vol': if (st.vol !== !!m.on) { st.vol = !!m.on; H.rosterDirty = true; renderSpinPool(); saveHostSnap(); } break;
+    case 'vol': if (H.signup && st.vol !== !!m.on) { st.vol = !!m.on; H.rosterDirty = true; renderSpinPool(); saveHostSnap(); } break;
     case 'rx': hostReaction(st, m.e); break;
   }
 }
@@ -1046,13 +1107,15 @@ function hostHello(conn, m) {
   send(st, viewMsg(st));
   send(st, liveMsg());
   if (H.spotlight) send(st, { t: 'spot', items: H.spotlight });
+  if (H.timer.total) send(st, timerMsg());
+  if (H.sb.show) send(st, sbMsg());
   H.rosterDirty = true; H.liveDirty = true; H.deckDirty = true; H.reportDirty = true;
   renderSpinPool(); saveHostSnap();
 }
 
 /* ---- views ---- */
 function currentItem() { return H.items[H.pos] || null; }
-function getPub(it) { if (!H.pub[it.id]) H.pub[it.id] = publicQ(it.q, it.id); return H.pub[it.id]; }
+function getPub(it) { if (!H.pub[it.id]) H.pub[it.id] = { ...publicQ(it.q, it.id), img: mediaIdFor(it) }; return H.pub[it.id]; }
 function resultsFor(it) {
   const ans = H.report.answers[it.id] || {}; const recs = Object.values(ans);
   const n = recs.length, correct = recs.filter(r => r.correct).length;
@@ -1065,12 +1128,17 @@ function resultsFor(it) {
   return res;
 }
 function viewMsg(st, cache) {
-  const base = { t: 'view', paused: H.paused, look: H.look, review: H.review, pos: H.pos, total: H.items.length };
+  const base = { t: 'view', paused: H.paused, look: H.look, review: H.review, signup: H.signup, pos: H.pos, total: H.items.length };
   if (H.ended) return { t: 'view', k: 'end' };
   const it = currentItem();
   if (!it) return { ...base, k: 'wait' };
   switch (it.kind) {
-    case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '' };
+    case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '', ink: H.ink[it.id] || [] };
+    case 'dots': return dotsViewMsg(base, it, st);
+    case 'draw': {
+      const rec = (H.report.answers[it.id] || {})[st.id];
+      return { ...base, k: 'draw', qid: it.id, prompt: it.prompt || '', read: it.read || '', bg: mediaIdFor(it), aspect: drawAspect(it), phase: H.phase[it.id] || 'open', mine: rec ? rec.raw : null };
+    }
     case 'text': return { ...base, k: 'text', title: it.title || '', body: it.body || '', read: it.read || '' };
     case 'check': { const c = H.report.checkins[it.id]; return { ...base, k: 'check', iid: it.id, prompt: it.prompt || '', mine: c && c.votes[st.id] || null }; }
     case 'q': {
@@ -1089,29 +1157,38 @@ function broadcastView() { const cache = {}; for (const st of H.students.values(
 function liveMsg() {
   const it = currentItem();
   let answered = null;
-  if (it && it.kind === 'q') answered = Object.keys(H.report.answers[it.id] || {}).length;
+  if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) answered = Object.keys(H.report.answers[it.id] || {}).length;
   return { t: 'live', answered, online: onlineStudents().length, stars: H.stars, rx: H.rx };
 }
 
 /* ---- student actions ---- */
 function ensureReportQuestion(it) {
   if (H.report.questions.some(q => q.qid === it.id)) return;
-  const n = H.items.filter(x => x.kind === 'q').indexOf(it) + 1;
-  H.report.questions.push({ qid: it.id, n, type: it.q.type, text: it.q.text });
+  const n = H.items.filter(x => x.kind === 'q' || x.kind === 'draw' || x.kind === 'dots').indexOf(it) + 1;
+  if (it.kind === 'dots') { H.report.questions.push({ qid: it.id, n, type: 'dots', text: it.prompt || 'Dot map', graded: (it.zones || []).some(z => z.correct) }); H.reportDirty = true; return; }
+  H.report.questions.push(it.kind === 'draw' ? { qid: it.id, n, type: 'draw', text: it.prompt || 'Drawing' } : { qid: it.id, n, type: it.q.type, text: it.q.text });
   H.reportDirty = true;
 }
 function hostAnswer(st, m) {
   const it = currentItem();
-  if (!it || it.kind !== 'q' || m.qid !== it.id || (H.phase[it.id] || 'open') !== 'open') return;
-  const a = sanitizeAnswer(it.q, m.a); if (a == null) return;
-  const correct = grade(it.q, a);
-  (H.report.answers[it.id] ||= {})[st.id] = { raw: a, a: answerText(it.q, a), correct, t: Date.now() };
+  if (!it || (it.kind !== 'q' && it.kind !== 'draw' && it.kind !== 'dots') || m.qid !== it.id || (H.phase[it.id] || 'open') !== 'open') return;
+  if (it.kind === 'dots') {
+    const rec = dotAnswer(it, m.a); if (!rec) return;
+    (H.report.answers[it.id] ||= {})[st.id] = rec; H.dotsDirty = true;
+  } else if (it.kind === 'draw') {
+    const d = sanitizeDrawing(m.a); if (!d) return;
+    (H.report.answers[it.id] ||= {})[st.id] = { raw: d, a: '(drawing)', correct: null, t: Date.now() };
+    H.galleryDirty = true;
+  } else {
+    const a = sanitizeAnswer(it.q, m.a); if (a == null) return;
+    (H.report.answers[it.id] ||= {})[st.id] = { raw: a, a: answerText(it.q, a), correct: grade(it.q, a), t: Date.now() };
+  }
   ensureReportQuestion(it);
   send(st, { t: 'ack', qid: it.id });
   H.liveDirty = true; H.reportDirty = true;
   const online = onlineStudents().length, answered = Object.keys(H.report.answers[it.id]).length;
   if (online > 0 && !H.goalHit.has(it.id) && answered / online >= GOAL_PCT) {
-    H.goalHit.add(it.id); H.stars++; broadcast({ t: 'star', stars: H.stars }); toast('The class earned a star! ⭐'); saveHostSnap();
+    H.goalHit.add(it.id); H.stars++; broadcast({ t: 'star', stars: H.stars }); toast('The class earned a star! ⭐'); awardStarPoint(); saveHostSnap();
   }
 }
 function hostCheckin(st, m) {
@@ -1131,6 +1208,9 @@ function hostTick() {
   if (!H || H.ended) return;
   const now = performance.now();
   pumpSlides(now);
+  if (H.timer.total) updateHostTimer();
+  dotsTick(now);
+  if (H.galleryDirty && now - H.lastGallery > 1000) { H.lastGallery = now; const it = currentItem(); if (it && it.kind === 'draw') renderGallery(it); else H.galleryDirty = false; }
   if (now - H.lastPing > 5000) {
     H.lastPing = now; const t = Date.now();
     for (const st of H.students.values()) {
@@ -1150,16 +1230,16 @@ function bufferedOf(st) { const c = st.conn; const dc = c && c.dataChannel; retu
 function slideOrder() {
   // current slide first, then forward, then the rest
   if (H._orderPos === H.pos && H._order) return H._order;
-  const idx = H.items.map((it, i) => (it.kind === 'slide' && H.slideData.has(it.id)) ? i : -1).filter(i => i >= 0);
+  const idx = H.items.map((it, i) => (mediaIdFor(it) && H.slideData.has(mediaIdFor(it))) ? i : -1).filter(i => i >= 0);
   const fwd = idx.filter(i => i >= H.pos), back = idx.filter(i => i < H.pos).reverse();
-  H._order = [...fwd, ...back].map(i => H.items[i].id); H._orderPos = H.pos;
+  H._order = [...fwd, ...back].map(i => mediaIdFor(H.items[i])); H._orderPos = H.pos;
   return H._order;
 }
 function pumpSlides(now) {
   const dt = Math.min(1, (now - H.lastTick) / 1000); H.lastTick = now;
   H.bucket = Math.min(H.rate * 0.5, H.bucket + H.rate * dt);
-  if (!H.sids.length) return;
-  const list = [...H.students.values()].filter(s => s.online && s.conn && s.conn.open && s.have.size < H.sids.length);
+  if (!H.mediaIds.length) return;
+  const list = [...H.students.values()].filter(s => s.online && s.conn && s.conn.open && s.have.size < H.mediaIds.length);
   if (!list.length) return;
   const order = slideOrder();
   // Class-wide priority: everyone gets the current slide's quick preview, then everyone gets the
@@ -1180,11 +1260,11 @@ function pumpSlides(now) {
   }
 }
 function nextPart(st, order) {
-  const cur = currentItem();
-  if (cur && cur.kind === 'slide' && H.slideData.has(cur.id) && !st.have.has(cur.id)) {
-    const d = H.slideData.get(cur.id);
-    if (d.pbuf && !st.havePrev.has(cur.id) && !st.sent.has(cur.id)) return { sid: cur.id, prev: true, level: 0 };
-    return { sid: cur.id, prev: false, level: 1 };
+  const cm = mediaIdFor(currentItem());
+  if (cm && H.slideData.has(cm) && !st.have.has(cm)) {
+    const d = H.slideData.get(cm);
+    if (d.pbuf && !st.havePrev.has(cm) && !st.sent.has(cm)) return { sid: cm, prev: true, level: 0 };
+    return { sid: cm, prev: false, level: 1 };
   }
   const sid = order.find(id => !st.have.has(id));
   return sid ? { sid, prev: false, level: 2 } : null;
@@ -1204,14 +1284,15 @@ function sendPart(st, sid, isPrev) {
 /* ---- navigation & teacher controls ---- */
 function hostGo(pos) {
   if (!H || pos < 0 || pos >= H.items.length) return;
-  H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true;
+  H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null;
   const it = currentItem();
-  if (it && it.kind === 'q') { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
+  if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
+  if (it && it.signup && !H.signup) setSignup(true, true);
   broadcast({ t: 'spot', items: null });
   broadcastView(); renderHostStage(); renderHostSide(); saveHostSnap();
 }
 function setPhase(ph) {
-  const it = currentItem(); if (!it || it.kind !== 'q') return;
+  const it = currentItem(); if (!it || (it.kind !== 'q' && it.kind !== 'draw' && it.kind !== 'dots')) return;
   H.phase[it.id] = ph; broadcastView(); renderHostStage(); saveHostSnap();
 }
 function toggleFlag(flag, btn) {
@@ -1227,7 +1308,8 @@ function saveHostSnap() {
     ssSet(KEYS.host, {
       code: H.code, lessonId: H.lesson.id, pos: H.pos, phase: H.phase, review: H.review,
       students: [...H.students.values()].map(s => ({ id: s.id, token: s.token, name: s.name, vol: s.vol, shared: s.shared })),
-      manual: H.manual, spin: H.spin, stars: H.stars, goalHit: [...H.goalHit]
+      manual: H.manual, spin: H.spin, stars: H.stars, goalHit: [...H.goalHit],
+      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
     });
   }, 400);
 }
@@ -1246,7 +1328,8 @@ async function endSession() {
   const peer = H.peer;
   for (const u of H.urls.values()) URL.revokeObjectURL(u);
   setTimeout(() => { try { peer && peer.destroy(); } catch { /* ignore */ } }, 1500);
-  $('#spin-overlay').hidden = true; $('#spot-overlay').hidden = true;
+  $('#spin-overlay').hidden = true; $('#spot-overlay').hidden = true; $('#tools-overlay').hidden = true;
+  $('#h-timer').hidden = true; $('#h-score').hidden = true;
   H = null;
   enterDash('report');
 }
@@ -1261,12 +1344,15 @@ function itemLabel(it) {
     case 'text': return 'Text: ' + (it.title || 'Untitled');
     case 'q': return TYPE_LABEL[it.q.type] + ': ' + it.q.text;
     case 'check': return 'Check-in: ' + (it.prompt || '');
+    case 'draw': return 'Drawing: ' + (it.prompt || '');
+    case 'dots': return 'Dot map: ' + (it.prompt || '');
   }
   return '';
 }
 function hostQPreview(it) {
   const q = it.q, p = getPub(it);
   const card = el('div', { class: 'q-card' }, el('div', { class: 'tag', text: TYPE_LABEL[q.type] }), el('div', { class: 'q-text', text: q.text }));
+  if (p.img) card.append(el('div', { class: 'q-img' }, el('img', { src: H.urls.get(p.img), alt: 'Question picture' })));
   const list = p.options || p.items || p.bank || (p.lefts ? p.lefts.map((l, i) => l + '  ·  ' + (p.rights[i] || '')) : null);
   if (list) card.append(el('ul', { class: 'q-preview' }, list.map(x => el('li', { text: x }))));
   if (p.groups) card.append(el('p', { class: 'muted', text: 'Groups: ' + p.groups.join(', ') }));
@@ -1275,19 +1361,18 @@ function hostQPreview(it) {
 function renderHostStage() {
   if (!H) return;
   const stage = $('#h-stage'); stage.replaceChildren();
-  stage.classList.toggle('pointing', H.pointer);
   const it = currentItem();
   if (!it) {
     stage.append(msgCard('🎤', 'Activities-only session', 'Use the share spinner, spotlight, pause and reactions. Students see a waiting screen.'));
   } else if (it.kind === 'slide') {
+    stage.append(inkToolbar(it));
     const frame = el('div', { class: 'slide-frame' });
-    const img = el('img', { src: H.urls.get(it.id), alt: 'Current slide' });
-    img.addEventListener('click', e => {
-      if (!H.pointer) return;
-      const r = img.getBoundingClientRect(); const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
-      broadcast({ t: 'pt', x: +x.toFixed(3), y: +y.toFixed(3) }); showPointer(stage, x, y);
-    });
-    frame.append(img); stage.append(frame);
+    frame.append(el('img', { src: H.urls.get(it.id), alt: 'Current slide' })); stage.append(frame);
+    attachHostInk(frame, it);
+  } else if (it.kind === 'draw') {
+    renderDrawStage(stage, it);
+  } else if (it.kind === 'dots') {
+    renderDotStage(stage, it);
   } else if (it.kind === 'text') {
     stage.append(el('div', { class: 'text-slide' }, it.title ? el('h2', { text: it.title }) : null, el('p', { text: it.body || '' })));
   } else if (it.kind === 'q') {
@@ -1317,7 +1402,7 @@ function renderHostLive(msg) {
   if (!H) return;
   const it = currentItem(), online = msg.online;
   let line = '⭐ ' + H.stars + ' class stars';
-  if (it && it.kind === 'q') {
+  if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) {
     line = 'Answered ' + msg.answered + ' of ' + online + '  ·  ' + line;
     const a = $('#h-answered'); if (a) a.textContent = msg.answered + ' of ' + online + ' answered';
   }
@@ -1335,18 +1420,18 @@ function renderHostSide() {
   if (!H) return;
   const all = [...H.students.values()], on = all.filter(s => s.online);
   const inClass = on.filter(s => s.hidden).length;
-  $('#h-count').textContent = on.length + (on.length === 1 ? ' student' : ' students') + (inClass ? ' (' + inClass + ' in Class)' : '');
+  $('#h-count').textContent = on.length + (on.length === 1 ? ' student' : ' students') + (inClass ? ' (' + inClass + ' in LL)' : '');
   if (H.sids.length) {
     const ready = on.filter(s => s.have.size >= H.sids.length).length;
     $('#h-deck').hidden = false; $('#h-deck').textContent = 'Slides ready: ' + ready + '/' + on.length;
   } else $('#h-deck').hidden = true;
-  const vols = all.filter(s => s.vol && s.online).length + H.manual.length;
+  const vols = (H.signup ? all.filter(s => s.vol && s.online).length : 0) + H.manual.length;
   $('#h-vol-count').textContent = String(vols);
   const ul = $('#h-roster'); ul.replaceChildren();
   all.sort((a, b) => naturalSort(a.name, b.name)).forEach(s => {
     let dot = 'dot', status = '';
     if (!s.online) { dot += ' off'; status = 'left'; }
-    else if (s.hidden) { dot += ' away'; status = '🎤 in Class'; }
+    else if (s.hidden) { dot += ' away'; status = '🎤 in LL'; }
     else if (s.quiet) { dot += ' away'; status = 'no signal'; }
     ul.append(el('li', null, el('span', { class: dot }), el('span', { class: 'rname', text: s.name }),
       s.vol && s.online ? el('span', { title: 'Wants to share' }, '✋') : null,
@@ -1362,6 +1447,7 @@ function spinPool() {
   return vols.concat(H.manual.map(m => ({ id: m.id, name: m.name, shared: m.shared, manual: true })));
 }
 function openSpinner() {
+  if (!H.signup) setSignup(true);
   const ov = $('#spin-overlay'); ov.hidden = false;
   $('#spin-host-controls').hidden = false;
   document.querySelector(`input[name="spin-mode"][value="${H.spin.mode}"]`).checked = true;
@@ -1448,9 +1534,19 @@ function closeSpinner() {
 
 /* ---- spotlight ---- */
 function openSpotlight() {
-  const it = currentItem(); const list = $('#spot-list'); list.replaceChildren();
-  if (!it || it.kind !== 'q') { list.append(el('p', { class: 'muted' }, 'Spotlight works on a question. Go to a question first.')); }
-  else {
+  const it = currentItem();
+  if (it && it.kind === 'dots') { toast('For a dot map, use “Share the dot map with the class”.'); return; } const list = $('#spot-list'); list.replaceChildren();
+  if (!it || (it.kind !== 'q' && it.kind !== 'draw')) { list.append(el('p', { class: 'muted' }, 'Spotlight works on a question. Go to a question first.')); }
+  else if (it.kind === 'draw') {
+    const ans = H.report.answers[it.id] || {}, bg = hostImg(mediaIdFor(it));
+    if (!Object.keys(ans).length) list.append(el('p', { class: 'muted' }, 'No drawings yet.'));
+    else list.append(el('p', { class: 'muted' }, 'Pick up to 4 drawings.'));
+    Object.entries(ans).forEach(([sid, r]) => {
+      const st = H.students.get(sid);
+      list.append(el('label', { class: 'check spot-pick' }, el('input', { type: 'checkbox', value: sid }),
+        renderDrawing(document.createElement('canvas'), r.raw.s, bg, drawAspect(it), 160), el('strong', { class: 'sname', text: st ? st.name : 'Student' })));
+    });
+  } else {
     const ans = H.report.answers[it.id] || {};
     const rows = Object.entries(ans).filter(([, r]) => r.a);
     if (!rows.length) list.append(el('p', { class: 'muted' }, 'No answers yet.'));
@@ -1463,19 +1559,743 @@ function openSpotlight() {
   $('#spot-overlay').hidden = false;
 }
 function showSpotlight() {
-  const it = currentItem(); if (!it || it.kind !== 'q') return;
+  const it = currentItem(); if (!it || (it.kind !== 'q' && it.kind !== 'draw')) return;
   const anon = document.querySelector('input[name="spot-mode"]:checked').value === 'anon';
   const ans = H.report.answers[it.id] || {};
   const picked = [...document.querySelectorAll('#spot-list input:checked')].map(c => c.value);
   if (!picked.length) { toast('Tick at least one answer.'); return; }
+  if (it.kind === 'draw' && picked.length > 4) { toast('Pick 4 drawings or fewer.'); return; }
+  const firstName = st => anon || !st ? null : st.name.replace(/\s\(\d+\)$/, '').split(' ')[0];
   H.spotlight = picked.map(sid => {
     const st = H.students.get(sid);
-    return { text: ans[sid] ? ans[sid].a : '', by: anon || !st ? null : st.name.replace(/\s\(\d+\)$/, '').split(' ')[0] };
+    if (it.kind === 'draw') return { d: ans[sid] ? ans[sid].raw : { s: [] }, bg: mediaIdFor(it), aspect: drawAspect(it), by: firstName(st) };
+    return { text: ans[sid] ? ans[sid].a : '', by: firstName(st) };
   });
   broadcast({ t: 'spot', items: H.spotlight });
   $('#spot-overlay').hidden = true; toast('Spotlight is showing on student screens.');
 }
 function hideSpotlight() { H.spotlight = null; broadcast({ t: 'spot', items: null }); $('#spot-overlay').hidden = true; toast('Spotlight hidden.'); }
+
+/* =====================================================================
+   15. CLASSROOM TOOLS: timer, dice, scoreboard, random wheel
+   ===================================================================== */
+function chime() {
+  try {
+    const A = window.AudioContext || window.webkitAudioContext; if (!A) return;
+    const a = chime.ctx || (chime.ctx = new A());
+    [0, 0.18, 0.36].forEach((t, i) => {
+      const o = a.createOscillator(), g = a.createGain();
+      o.frequency.value = [880, 1046, 1318][i]; o.type = 'sine';
+      g.gain.setValueAtTime(0.0001, a.currentTime + t); g.gain.exponentialRampToValueAtTime(0.25, a.currentTime + t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + t + 0.35);
+      o.connect(g).connect(a.destination); o.start(a.currentTime + t); o.stop(a.currentTime + t + 0.4);
+    });
+  } catch { /* sound is optional */ }
+}
+function fmtTime(ms) { const s = Math.ceil(Math.max(0, ms) / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+const DIE_FACES = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
+const Wheels = { all() { const v = lsGet(KEYS.wheels, []); return Array.isArray(v) ? v : []; }, save(v) { lsSet(KEYS.wheels, v); } };
+
+/* ---------- teacher: state helpers ---------- */
+function timerLeft() { const t = H.timer; if (!t.total) return 0; return t.run ? Math.max(0, t.left - (performance.now() - t.at)) : t.left; }
+function timerMsg() { const t = H.timer; return t.total ? { t: 'tm', left: Math.round(timerLeft()), run: t.run, total: t.total, chime: t.stChime } : { t: 'tm', off: 1 }; }
+function setTimer(patch) { Object.assign(H.timer, patch); broadcast(timerMsg()); updateHostTimer(); saveHostSnap(); if (toolsTab === 'timer') renderTools(); }
+function updateHostTimer() {
+  const b = $('#h-timer'); if (!H || !H.timer.total) { b.hidden = true; return; }
+  const left = timerLeft(); b.hidden = false; b.textContent = (left <= 0 ? '⏰ ' : '⏱ ') + fmtTime(left);
+  b.dataset.state = left <= 0 ? 'done' : left <= 10000 ? 'low' : '';
+  const big = $('#tool-big-time'); if (big) big.textContent = fmtTime(left);
+  if (H.timer.run && left <= 0) { H.timer.run = false; H.timer.left = 0; broadcast(timerMsg()); if (H.timer.chime) chime(); toast('⏰ Time’s up!'); if (toolsTab === 'timer') renderTools(); }
+}
+function sbMsg() { return { t: 'sb', show: H.sb.show, teams: H.sb.teams }; }
+function setScore() { broadcast(sbMsg()); updateHostScore(); saveHostSnap(); }
+function updateHostScore() {
+  const b = $('#h-score'); if (!H || !H.sb.show) { b.hidden = true; return; }
+  b.hidden = false; b.textContent = '🏆 ' + H.sb.teams.map(t => t.n + ' ' + t.s).join(' · ');
+}
+function awardStarPoint() {
+  if (!H.sb.autoStar) return;
+  const team = H.sb.teams.find(t => /student|class/i.test(t.n)) || H.sb.teams[1] || H.sb.teams[0];
+  if (team) { team.s++; setScore(); }
+}
+
+/* ---------- teacher: the tools panel ---------- */
+let toolsTab = 'timer';
+function openTools(tab) { if (tab) toolsTab = tab; $('#tools-overlay').hidden = false; renderTools(); }
+function closeTools() { $('#tools-overlay').hidden = true; }
+function renderTools() {
+  if ($('#tools-overlay').hidden) return;
+  document.querySelectorAll('#tools-tabs .tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tool === toolsTab)));
+  const body = $('#tools-body'); body.replaceChildren();
+  ({ timer: toolTimer, dice: toolDice, score: toolScore, wheel: toolWheel })[toolsTab](body);
+}
+function toolTimer(body) {
+  const t = H.timer;
+  body.append(el('div', { class: 'big-time', id: 'tool-big-time' }, fmtTime(timerLeft())));
+  const presets = el('div', { class: 'spin-buttons' }, [1, 2, 3, 5, 10].map(m => el('button', { class: 'btn', onclick: () => setTimer({ total: m * 60000, left: m * 60000, run: true, at: performance.now() }) }, m + ' min')));
+  const mm = el('input', { type: 'number', min: 0, max: 99, value: 1, 'aria-label': 'Minutes', class: 'num' }), ss = el('input', { type: 'number', min: 0, max: 59, value: 30, 'aria-label': 'Seconds', class: 'num' });
+  const custom = el('div', { class: 'row-inline' }, mm, ':', ss, el('button', { class: 'btn', onclick: () => { const ms = ((+mm.value || 0) * 60 + (+ss.value || 0)) * 1000; if (ms > 0) setTimer({ total: ms, left: ms, run: true, at: performance.now() }); } }, 'Start'));
+  const ctl = el('div', { class: 'spin-buttons' });
+  if (t.total) {
+    if (t.run) ctl.append(el('button', { class: 'btn btn-primary', onclick: () => setTimer({ left: timerLeft(), run: false }) }, '⏸ Pause'));
+    else if (timerLeft() > 0) ctl.append(el('button', { class: 'btn btn-primary', onclick: () => setTimer({ run: true, at: performance.now() }) }, '▶ Resume'));
+    ctl.append(el('button', { class: 'btn', onclick: () => setTimer({ left: timerLeft() + 30000, total: H.timer.total + 30000, at: performance.now(), run: H.timer.run || timerLeft() <= 0 }) }, '+30 sec'),
+      el('button', { class: 'btn btn-ghost', onclick: () => setTimer({ total: 0, left: 0, run: false }) }, 'Stop & hide'));
+  }
+  const ch = el('input', { type: 'checkbox' }); ch.checked = t.chime; ch.addEventListener('change', () => { H.timer.chime = ch.checked; saveHostSnap(); });
+  const sch = el('input', { type: 'checkbox' }); sch.checked = t.stChime; sch.addEventListener('change', () => { H.timer.stChime = sch.checked; broadcast(timerMsg()); saveHostSnap(); });
+  body.append(presets, custom, ctl,
+    el('label', { class: 'check small' }, ch, 'Chime on my computer when time is up'),
+    el('label', { class: 'check small' }, sch, 'Chime on student devices too'),
+    el('p', { class: 'muted' }, 'Students see a small timer at the top of their screen. It keeps going if you close this panel.'));
+}
+function diceFacesFromText(txt) { return txt.split('\n').map(s => cleanText(s, 30).trim()).filter(Boolean).slice(0, 20); }
+function toolDice(body) {
+  const d = H.dice;
+  const count = el('div', { class: 'seg', role: 'group', 'aria-label': 'How many dice' }, [1, 2, 3].map(n => el('button', { class: 'chip', 'aria-pressed': String(d.n === n), onclick: () => { d.n = n; renderTools(); } }, n + (n === 1 ? ' die' : ' dice'))));
+  const kind = el('div', { class: 'seg', role: 'group', 'aria-label': 'Dice faces' },
+    el('button', { class: 'chip', 'aria-pressed': String(!d.custom), onclick: () => { d.custom = false; renderTools(); } }, 'Dots 1–6'),
+    el('button', { class: 'chip', 'aria-pressed': String(!!d.custom), onclick: () => { d.custom = true; renderTools(); } }, 'My own faces'));
+  body.append(el('label', null, 'Dice'), count, el('label', null, 'Faces'), kind);
+  if (d.custom) {
+    const ta = el('textarea', { rows: 4, 'aria-label': 'One face per line' }); ta.value = d.text;
+    ta.addEventListener('input', () => { d.text = ta.value; });
+    body.append(el('p', { class: 'muted' }, 'One face per line (for example: add, subtract, multiply).'), ta);
+  }
+  const vis = el('div', { class: 'spin-visual', id: 'dice-host' });
+  body.append(el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-sun', onclick: () => rollDice(vis) }, '🎲 Roll'),
+    el('button', { class: 'btn btn-ghost', onclick: () => broadcast({ t: 'toolclose' }) }, 'Hide from class')), vis);
+}
+function rollDice(vis) {
+  const d = H.dice, faces = d.custom ? diceFacesFromText(d.text) : null;
+  if (d.custom && faces.length < 2) { toast('Add at least 2 faces, one per line.'); return; }
+  const n = faces ? faces.length : 6, vals = Array.from({ length: d.n }, () => rand(n));
+  const msg = { t: 'dice', faces, vals, dur: reduceMotion() ? 200 : 1300 };
+  broadcast(msg); showDice(vis, msg);
+}
+function diceLabel(faces, v) { return faces ? faces[v] : DIE_FACES[v]; }
+function showDice(vis, m, resultEl) {
+  vis.replaceChildren();
+  const row = el('div', { class: 'dice-row' }); vis.append(row);
+  const dice = m.vals.map(() => { const d = el('div', { class: 'die' + (m.faces ? ' word' : '') }); row.append(d); return d; });
+  const n = m.faces ? m.faces.length : 6;
+  const tick = setInterval(() => dice.forEach(d => { d.textContent = diceLabel(m.faces, rand(n)); }), 90);
+  setTimeout(() => {
+    clearInterval(tick); dice.forEach((d, i) => { d.textContent = diceLabel(m.faces, m.vals[i]); d.classList.add('landed'); });
+    const total = m.faces ? null : m.vals.reduce((a, v) => a + v + 1, 0);
+    const txt = m.faces ? m.vals.map(v => m.faces[v]).join(' + ') : (m.vals.length > 1 ? 'Total: ' + total : 'You rolled ' + total);
+    if (resultEl) resultEl.textContent = txt; else vis.append(el('div', { class: 'spin-result', text: txt }));
+  }, m.dur);
+}
+function toolScore(body) {
+  const sb = H.sb;
+  const list = el('div', { class: 'score-list' });
+  sb.teams.forEach((t, i) => {
+    const name = el('input', { maxlength: 20, 'aria-label': 'Team name' }); name.value = t.n;
+    name.addEventListener('change', () => { t.n = cleanText(name.value, 20).trim() || 'Team'; setScore(); });
+    list.append(el('div', { class: 'score-row' }, name,
+      el('button', { class: 'btn', 'aria-label': 'Minus one for ' + t.n, onclick: () => { t.s--; setScore(); renderTools(); } }, '−'),
+      el('span', { class: 'score-num', text: String(t.s) }),
+      el('button', { class: 'btn btn-primary', 'aria-label': 'Plus one for ' + t.n, onclick: () => { t.s++; setScore(); renderTools(); } }, '+'),
+      sb.teams.length > 2 ? el('button', { class: 'btn btn-ghost', 'aria-label': 'Remove ' + t.n, onclick: () => { sb.teams.splice(i, 1); setScore(); renderTools(); } }, '✕') : null));
+  });
+  const show = el('input', { type: 'checkbox' }); show.checked = sb.show; show.addEventListener('change', () => { sb.show = show.checked; setScore(); });
+  const auto = el('input', { type: 'checkbox' }); auto.checked = sb.autoStar; auto.addEventListener('change', () => { sb.autoStar = auto.checked; saveHostSnap(); });
+  body.append(list, el('div', { class: 'spin-buttons' },
+    sb.teams.length < 4 ? el('button', { class: 'btn', onclick: () => { sb.teams.push({ n: 'Team ' + (sb.teams.length + 1), s: 0 }); setScore(); renderTools(); } }, '+ Add team') : null,
+    el('button', { class: 'btn', onclick: () => { sb.teams.forEach(t => { t.s = 0; }); setScore(); renderTools(); } }, 'Reset scores'),
+    el('button', { class: 'btn', onclick: () => { sb.teams = [{ n: 'Teacher', s: 0 }, { n: 'Students', s: 0 }]; setScore(); renderTools(); } }, 'Teacher vs Students')),
+    el('label', { class: 'check small' }, show, 'Show the scoreboard on student screens'),
+    el('label', { class: 'check small' }, auto, 'Give Students +1 when the class earns a ⭐'));
+}
+function toolWheel(body) {
+  const lists = Wheels.all();
+  const pick = el('select', { 'aria-label': 'Which list' },
+    el('option', { value: '__class' }, 'Everyone in class (names)'), lists.map(l => el('option', { value: l.id }, l.name + ' (' + l.items.length + ')')));
+  pick.value = H.wheel.listId && (H.wheel.listId === '__class' || lists.some(l => l.id === H.wheel.listId)) ? H.wheel.listId : (lists[0] ? lists[0].id : '__class');
+  H.wheel.listId = pick.value;
+  pick.addEventListener('change', () => { H.wheel.listId = pick.value; renderTools(); });
+  const rm = el('input', { type: 'checkbox' }); rm.checked = H.wheel.remove; rm.addEventListener('change', () => { H.wheel.remove = rm.checked; });
+  const cur = lists.find(l => l.id === pick.value);
+  body.append(el('label', null, 'List'), el('div', { class: 'row-inline' }, pick,
+    el('button', { class: 'btn', onclick: () => editWheelList(null) }, 'New list'),
+    cur ? el('button', { class: 'btn', onclick: () => editWheelList(cur) }, 'Edit') : null,
+    cur ? el('button', { class: 'btn btn-danger', onclick: async () => { if (await confirmBox('Delete “' + cur.name + '”?')) { Wheels.save(Wheels.all().filter(x => x.id !== cur.id)); H.wheel.listId = null; renderTools(); } } }, 'Delete') : null),
+    el('label', { class: 'check small' }, rm, 'Take out each pick until I reset'));
+  const used = H.wheel.used[pick.value] || [];
+  if (used.length) body.append(el('p', { class: 'muted' }, 'Already picked: ' + used.join(', ') + ' ', el('button', { class: 'btn btn-small', onclick: () => { H.wheel.used[pick.value] = []; renderTools(); } }, 'Reset')));
+  const vis = el('div', { class: 'spin-visual' }), res = el('div', { class: 'spin-result', 'aria-live': 'assertive' });
+  body.append(el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-sun', onclick: () => spinWheel(vis, res) }, '🎡 Spin'),
+    el('button', { class: 'btn btn-ghost', onclick: () => broadcast({ t: 'toolclose' }) }, 'Hide from class')), vis, res);
+}
+function wheelItems(listId) {
+  if (listId === '__class') return [...H.students.values()].filter(s => s.online).map(s => s.name).sort(naturalSort);
+  const l = Wheels.all().find(x => x.id === listId); return l ? l.items.slice() : [];
+}
+function spinWheel(vis, res) {
+  const id = H.wheel.listId, used = (H.wheel.used[id] ||= []);
+  let items = wheelItems(id);
+  if (H.wheel.remove) items = items.filter(x => !used.includes(x));
+  if (!items.length) { toast(H.wheel.remove && used.length ? 'Everything has been picked. Choose Reset.' : 'This list is empty.'); return; }
+  items = shuffle(items);
+  const wi = rand(items.length), win = items[wi], dur = reduceMotion() ? 300 : 3800;
+  const title = id === '__class' ? 'Random pick' : (Wheels.all().find(x => x.id === id) || {}).name || 'Random wheel';
+  broadcast({ t: 'wheel', names: items, wi, win, dur, title });
+  res.textContent = '';
+  animateSpin(vis, items, wi, win, dur, () => { res.textContent = win; if (H.wheel.remove) { used.push(win); renderTools(); } });
+}
+function editWheelList(list) {
+  openModal((card, close) => {
+    const name = el('input', { maxlength: 40 }); name.value = list ? list.name : '';
+    const ta = el('textarea', { rows: 8 }); ta.value = list ? list.items.join('\n') : '';
+    card.append(el('h2', null, list ? 'Edit list' : 'New list'), el('label', null, 'List name'), name,
+      el('label', null, 'Items (one per line, up to 60)'), ta,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          const items = ta.value.split('\n').map(s => cleanText(s, 40).trim()).filter(Boolean).slice(0, 60);
+          if (!name.value.trim() || items.length < 2) { toast('Add a name and at least 2 items.'); return; }
+          const all = Wheels.all(), rec = { id: list ? list.id : uid(), name: cleanText(name.value, 40).trim(), items };
+          const i = all.findIndex(x => x.id === rec.id); if (i >= 0) all[i] = rec; else all.push(rec);
+          Wheels.save(all); H.wheel.listId = rec.id; close(); renderTools();
+        } }, 'Save'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
+  });
+}
+
+/* ---------- student side ---------- */
+let stTimerT = null;
+function onTimer(m) {
+  clearInterval(stTimerT);
+  const b = $('#st-timer');
+  if (m.off) { S.timer = null; b.hidden = true; return; }
+  S.timer = { end: Date.now() + m.left, run: m.run, left: m.left, chime: m.chime, rang: m.left <= 0 };
+  const paint = () => {
+    const t = S.timer; if (!t) return;
+    const left = t.run ? t.end - Date.now() : t.left;
+    b.hidden = false; b.textContent = (left <= 0 ? '⏰ Time’s up!' : '⏱ ' + fmtTime(left));
+    b.dataset.state = left <= 0 ? 'done' : left <= 10000 ? 'low' : '';
+    if (left <= 0 && !t.rang) { t.rang = true; clearInterval(stTimerT); if (t.chime) chime(); toast('⏰ Time’s up!'); }
+  };
+  paint(); if (m.run) stTimerT = setInterval(paint, 250);
+}
+function onScore(m) {
+  const b = $('#st-score');
+  if (!m.show) { b.hidden = true; return; }
+  b.hidden = false; b.textContent = '🏆 ' + (m.teams || []).map(t => cleanText(t.n, 20) + ' ' + (t.s | 0)).join(' · ');
+}
+function studentTool(m) {
+  const ov = $('#tool-overlay');
+  if (m.t === 'toolclose') { ov.hidden = true; return; }
+  ov.hidden = false;
+  const vis = $('#tool-visual'), res = $('#tool-result'); res.textContent = '';
+  if (m.t === 'dice') { $('#tool-title').textContent = '🎲 Dice'; showDice(vis, m, res); }
+  else { $('#tool-title').textContent = '🎡 ' + cleanText(m.title || 'Random wheel', 40); animateSpin(vis, m.names, m.wi, m.win, m.dur, () => { res.textContent = m.win; }); }
+}
+
+/* =====================================================================
+   14. INK: shared stroke drawing (annotations + drawing answers)
+   A stroke = { id, c: color, w: width in 1/1000 of picture width, hl: highlighter?, p: [x,y,x,y…] }
+   Points are whole numbers 0–10000 across the picture, so every screen size lines up.
+   ===================================================================== */
+const INK_COLORS = ['#D62F4B', '#1F6FD1', '#178A4C', '#1E2B4A'];
+const DRAW_COLORS = ['#1E2B4A', '#D62F4B', '#1F6FD1', '#178A4C', '#F2A100', '#8A3FD1'];
+const HIGHLIGHT = '#FFD43B';
+function paintStrokes(ctx, strokes, W, Hh) {
+  for (const s of strokes || []) {
+    const p = s.p; if (!p || p.length < 2) continue;
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = s.c; ctx.globalAlpha = s.hl ? 0.45 : 1; ctx.lineWidth = Math.max(1, s.w / 1000 * W);
+    ctx.beginPath(); ctx.moveTo(p[0] / 10000 * W, p[1] / 10000 * Hh);
+    if (p.length === 2) ctx.lineTo(p[0] / 10000 * W + 0.1, p[1] / 10000 * Hh);
+    for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i] / 10000 * W, p[i + 1] / 10000 * Hh);
+    ctx.stroke(); ctx.restore();
+  }
+}
+function fitCanvas(c) {
+  const r = c.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  return [w, h];
+}
+function redrawInk(c, strokes) { if (!c || !c.isConnected) return; const [w, h] = fitCanvas(c); const x = c.getContext('2d'); x.clearRect(0, 0, w, h); paintStrokes(x, strokes, w, h); }
+function canvasPos(c, e) {
+  const r = c.getBoundingClientRect();
+  return [Math.round(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * 10000), Math.round(Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) * 10000)];
+}
+function strokeNear(strokes, x, y, r) {
+  for (let i = strokes.length - 1; i >= 0; i--) { const p = strokes[i].p; for (let k = 0; k < p.length; k += 2) if (Math.abs(p[k] - x) < r && Math.abs(p[k + 1] - y) < r) return i; }
+  return -1;
+}
+function applyInkOp(list, m) {
+  if (m.op === 'start' && m.s) list.push({ id: m.s.id, c: m.s.c, w: m.s.w, hl: !!m.s.hl, p: (m.s.p || []).slice() });
+  else if (m.op === 'pts') { const s = list.find(x => x.id === m.id); if (s && Array.isArray(m.p)) s.p.push(...m.p); }
+  else if (m.op === 'del') { const i = list.findIndex(x => x.id === m.id); if (i >= 0) list.splice(i, 1); }
+  else if (m.op === 'clear') list.length = 0;
+}
+/* Draw one finished drawing (with optional background picture) onto a canvas */
+function renderDrawing(canvas, strokes, bgImg, aspect, width) {
+  const w = width, h = Math.round(width / (aspect || 4 / 3));
+  canvas.width = w; canvas.height = h;
+  const x = canvas.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
+  if (bgImg && bgImg.complete && bgImg.naturalWidth) x.drawImage(bgImg, 0, 0, w, h);
+  paintStrokes(x, strokes, w, h);
+  return canvas;
+}
+
+/* ---- student side: teacher annotations + laser on the current slide ---- */
+function attachStudentInk(frame) {
+  const c = el('canvas', { class: 'ink-layer', 'aria-hidden': 'true' }); frame.append(c);
+  requestAnimationFrame(() => redrawInk(c, S.ink.strokes));
+}
+function onInkMsg(m) {
+  if (!S.view || S.view.k !== 'slide' || S.view.sid !== m.iid) return;
+  applyInkOp(S.ink.strokes, m);
+  redrawInk($('#st-stage .slide-frame .ink-layer'), S.ink.strokes);
+}
+let laserHideT = null;
+function showLaser(container, m) {
+  const frame = container.querySelector('.slide-frame'); if (!frame) return;
+  let dot = frame.querySelector('.laser-dot');
+  if (m.off) { if (dot) dot.remove(); return; }
+  if (!dot) { dot = el('div', { class: 'laser-dot', 'aria-hidden': 'true' }); frame.append(dot); }
+  dot.style.left = (m.x / 100) + '%'; dot.style.top = (m.y / 100) + '%';
+  clearTimeout(laserHideT); laserHideT = setTimeout(() => dot.remove(), 2000);
+}
+
+/* ---- teacher side: annotation toolbar + drawing on the current slide ---- */
+function inkToolbar(it) {
+  const tools = [['pointer', '👆 Point'], ['laser', '🔴 Laser'], ['pen', '✏️ Pen'], ['hl', '🖍 Highlight'], ['eraser', '🧽 Eraser']];
+  const bar = el('div', { class: 'ink-bar', role: 'toolbar', 'aria-label': 'Annotate this slide' });
+  tools.forEach(([t, label]) => bar.append(el('button', { class: 'tool-btn', type: 'button', 'aria-pressed': String(H.tool === t),
+    onclick: () => { H.tool = H.tool === t ? null : t; renderHostStage(); } }, label)));
+  bar.append(el('span', { class: 'swatches' }, INK_COLORS.map(c => el('button', { class: 'swatch', type: 'button', 'aria-label': 'Pen color', 'aria-pressed': String(H.inkColor === c), style: 'background:' + c,
+    onclick: () => { H.inkColor = c; if (H.tool !== 'pen') H.tool = 'pen'; renderHostStage(); } }))));
+  bar.append(el('button', { class: 'tool-btn', type: 'button', onclick: () => { const l = H.ink[it.id] || []; const s = l.pop(); if (s) { broadcast({ t: 'ink', op: 'del', iid: it.id, id: s.id }); redrawInk(H.inkCanvas, l); saveHostSnap(); } } }, '↶ Undo'),
+    el('button', { class: 'tool-btn', type: 'button', onclick: () => { H.ink[it.id] = []; broadcast({ t: 'ink', op: 'clear', iid: it.id }); redrawInk(H.inkCanvas, []); saveHostSnap(); } }, '🗑 Clear'));
+  return bar;
+}
+function attachHostInk(frame, it) {
+  const c = el('canvas', { class: 'ink-layer' + (H.tool ? ' active' : '') }); frame.append(c); H.inkCanvas = c;
+  const list = () => (H.ink[it.id] ||= []);
+  requestAnimationFrame(() => redrawInk(c, list()));
+  let cur = null, buf = [], flushT = null, lastLz = 0, erasing = false, drawing = false;
+  const flush = () => { flushT = null; if (cur && buf.length) { broadcast({ t: 'ink', op: 'pts', iid: it.id, id: cur.id, p: buf }); buf = []; } };
+  c.addEventListener('pointerdown', e => {
+    if (!H.tool) return;
+    e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const [x, y] = canvasPos(c, e); drawing = true;
+    if (H.tool === 'pointer') { broadcast({ t: 'pt', x: x / 10000, y: y / 10000 }); showPointer($('#h-stage'), x / 10000, y / 10000); }
+    else if (H.tool === 'laser') { broadcast({ t: 'lz', x, y }); showLaser($('#h-stage'), { x, y }); lastLz = performance.now(); }
+    else if (H.tool === 'eraser') { erasing = true; eraseAt(x, y); }
+    else {
+      if (list().length >= 300) { toast('This slide has a lot of ink. Clear some first.'); return; }
+      cur = { id: uid(6), c: H.tool === 'hl' ? HIGHLIGHT : H.inkColor, w: H.tool === 'hl' ? 24 : 5, hl: H.tool === 'hl', p: [x, y] };
+      list().push(cur); broadcast({ t: 'ink', op: 'start', iid: it.id, s: cur }); redrawInk(c, list());
+    }
+  });
+  c.addEventListener('pointermove', e => {
+    if (!drawing) return;
+    const [x, y] = canvasPos(c, e);
+    if (H.tool === 'laser') { const n = performance.now(); if (n - lastLz > 70) { lastLz = n; broadcast({ t: 'lz', x, y }); } showLaser($('#h-stage'), { x, y }); return; }
+    if (erasing) { eraseAt(x, y); return; }
+    if (!cur) return;
+    const p = cur.p, lx = p[p.length - 2], ly = p[p.length - 1];
+    if (Math.abs(x - lx) + Math.abs(y - ly) < 20 || p.length > 4000) return;
+    p.push(x, y); buf.push(x, y);
+    redrawInk(c, list());
+    if (!flushT) flushT = setTimeout(flush, 60);
+  });
+  const end = () => {
+    if (!drawing) return; drawing = false;
+    if (H.tool === 'laser') { broadcast({ t: 'lz', off: 1 }); showLaser($('#h-stage'), { off: 1 }); }
+    clearTimeout(flushT); flush(); cur = null; erasing = false; saveHostSnap();
+  };
+  c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end); c.addEventListener('pointerleave', end);
+  function eraseAt(x, y) {
+    const l = list(), i = strokeNear(l, x, y, 180);
+    if (i >= 0) { const s = l.splice(i, 1)[0]; broadcast({ t: 'ink', op: 'del', iid: it.id, id: s.id }); redrawInk(c, l); }
+  }
+}
+window.addEventListener('resize', () => {
+  if (H && H.inkCanvas) redrawInk(H.inkCanvas, H.ink[(currentItem() || {}).id] || []);
+  if (S.active) redrawInk($('#st-stage .slide-frame .ink-layer'), S.ink.strokes);
+  document.querySelectorAll('.draw-layer').forEach(c => c._redraw && c._redraw());
+});
+
+/* =====================================================================
+   16. DRAWING RESPONSES
+   Drawings travel as strokes (tiny), not pictures. Only the teacher sees them,
+   until the teacher spotlights some (first name or anonymous).
+   ===================================================================== */
+function mediaUrl(mid) { if (!mid) return null; const s = S.slides.get(mid), p = S.previews.get(mid); return (s && s.url) || (p && p.url) || null; }
+
+/* ---- student: drawing canvas ---- */
+function buildDrawResponse(v) {
+  const locked = v.phase !== 'open';
+  const card = el('div', { class: 'q-card draw-card' }, el('div', { class: 'q-text', text: v.prompt || 'Draw your answer.' }));
+  if (prefs.read) card.append(readBtn(() => v.read || v.prompt || 'Draw your answer.'));
+  if (!S.drawDraft[v.qid]) S.drawDraft[v.qid] = v.mine && Array.isArray(v.mine.s) ? JSON.parse(JSON.stringify(v.mine.s)) : [];
+  const strokes = S.drawDraft[v.qid];
+  const st = S.drawTool;
+  const frame = el('div', { class: 'draw-frame' }); frame.style.aspectRatio = String(v.aspect || 4 / 3); frame.style.setProperty('--ar', String(v.aspect || 4 / 3));
+  if (v.bg) { const u = mediaUrl(v.bg); frame.append(u ? el('img', { src: u, alt: '' }) : el('div', { class: 'slide-loading' }, 'Loading picture…')); }
+  const c = el('canvas', { class: 'ink-layer draw-layer' + (locked ? '' : ' active'), 'aria-label': 'Drawing space' });
+  frame.append(c);
+  c._redraw = () => redrawInk(c, strokes);
+  requestAnimationFrame(c._redraw);
+
+  const bar = el('div', { class: 'ink-bar draw-bar', role: 'toolbar', 'aria-label': 'Drawing tools' });
+  const paintBar = () => {
+    bar.replaceChildren(
+      el('span', { class: 'swatches' }, DRAW_COLORS.map(col => el('button', { class: 'swatch', type: 'button', 'aria-label': 'Color', 'aria-pressed': String(st.tool === 'pen' && st.color === col), style: 'background:' + col, disabled: locked,
+        onclick: () => { st.color = col; st.tool = 'pen'; paintBar(); } }))),
+      el('button', { class: 'tool-btn', type: 'button', 'aria-pressed': String(st.size === 5), disabled: locked, onclick: () => { st.size = 5; st.tool = 'pen'; paintBar(); } }, 'Thin'),
+      el('button', { class: 'tool-btn', type: 'button', 'aria-pressed': String(st.size === 14), disabled: locked, onclick: () => { st.size = 14; st.tool = 'pen'; paintBar(); } }, 'Thick'),
+      el('button', { class: 'tool-btn', type: 'button', 'aria-pressed': String(st.tool === 'eraser'), disabled: locked, onclick: () => { st.tool = st.tool === 'eraser' ? 'pen' : 'eraser'; paintBar(); } }, '🧽 Eraser'),
+      el('button', { class: 'tool-btn', type: 'button', disabled: locked, onclick: () => { strokes.pop(); c._redraw(); } }, '↶ Undo'),
+      el('button', { class: 'tool-btn', type: 'button', disabled: locked, onclick: () => { strokes.length = 0; c._redraw(); } }, '🗑 Clear'));
+  };
+  paintBar();
+  if (!locked) {
+    let cur = null;
+    c.addEventListener('pointerdown', e => {
+      e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      const [x, y] = canvasPos(c, e);
+      if (st.tool === 'eraser') { const i = strokeNear(strokes, x, y, 250); if (i >= 0) { strokes.splice(i, 1); c._redraw(); } cur = 'erase'; return; }
+      if (strokes.length >= 300) { toast('That’s a lot of lines! Undo some first.'); return; }
+      cur = { c: st.color, w: st.size, p: [x, y] }; strokes.push(cur); c._redraw();
+    });
+    c.addEventListener('pointermove', e => {
+      if (!cur) return;
+      const [x, y] = canvasPos(c, e);
+      if (cur === 'erase') { const i = strokeNear(strokes, x, y, 250); if (i >= 0) { strokes.splice(i, 1); c._redraw(); } return; }
+      const p = cur.p; if (Math.abs(x - p[p.length - 2]) + Math.abs(y - p[p.length - 1]) < 40 || p.length > 1600) return;
+      p.push(x, y); c._redraw();
+    });
+    const end = () => { cur = null; };
+    c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end);
+  }
+  card.append(bar, frame);
+  const note = el('span', { class: 'sent-note', id: 'q-sent', 'aria-live': 'polite' });
+  if (!locked) {
+    const submit = () => {
+      if (!strokes.length) { toast('Draw something first.'); return; }
+      const msg = { t: 'ans', qid: v.qid, a: { s: strokes.map(s => ({ c: s.c, w: s.w, p: s.p.slice() })) } };
+      S.pendingAns = msg; S.ackQid = null;
+      note.textContent = sendHost(msg) ? 'Sending…' : 'Not connected — it will send when you’re back.';
+    };
+    card.append(el('div', { class: 'q-actions' }, el('button', { class: 'btn btn-primary', type: 'button', onclick: submit }, 'Send my drawing'), note));
+    if (v.mine) note.textContent = 'Drawing sent ✓ You can change it and send again.';
+    card.append(el('p', { class: 'muted' }, 'Only your teacher sees your drawing.'));
+  } else card.append(el('p', { class: 'muted' }, v.mine ? 'Drawing sent ✓ Answers are closed.' : 'Answers are closed.'));
+  return card;
+}
+
+/* ---- teacher: checking + storing drawings ---- */
+function sanitizeDrawing(a) {
+  if (!a || !Array.isArray(a.s) || a.s.length > 300) return null;
+  let total = 0; const out = [];
+  for (const s of a.s) {
+    if (!s || !Array.isArray(s.p) || s.p.length < 2 || s.p.length % 2) continue;
+    total += s.p.length; if (total > 40000) return null;
+    const p = s.p.map(n => Math.max(0, Math.min(10000, Math.round(Number(n) || 0))));
+    out.push({ c: DRAW_COLORS.includes(s.c) ? s.c : DRAW_COLORS[0], w: Math.max(2, Math.min(30, Number(s.w) || 5)), p });
+  }
+  return out.length ? { s: out } : null;
+}
+function hostImg(mid) {
+  if (!mid) return null;
+  H.imgCache ||= {};
+  if (!H.imgCache[mid]) { const im = new Image(); im.src = H.urls.get(mid); im.onload = () => { H.galleryDirty = true; }; H.imgCache[mid] = im; }
+  return H.imgCache[mid];
+}
+function drawAspect(it) { return it.bgW && it.bgH ? it.bgW / it.bgH : 4 / 3; }
+
+/* ---- teacher: stage for a drawing question ---- */
+function renderDrawStage(stage, it) {
+  const ph = H.phase[it.id] || 'open';
+  stage.append(el('div', { class: 'q-card' }, el('div', { class: 'tag', text: 'Drawing' }), el('div', { class: 'q-text', text: it.prompt || 'Draw your answer.' })));
+  stage.append(el('div', { class: 'host-q-meta' },
+    el('span', { class: 'count-pill', id: 'h-answered' }, ''),
+    ph === 'open' ? el('button', { class: 'btn btn-primary', onclick: () => setPhase('closed') }, 'Stop answers')
+                  : el('button', { class: 'btn', onclick: () => setPhase('open') }, 'Reopen answers'),
+    el('button', { class: 'btn', onclick: openSpotlight }, '🔦 Spotlight drawings'),
+    el('button', { class: 'btn', onclick: () => downloadDrawings([it.id]) }, '⬇ Download drawings')));
+  stage.append(el('div', { class: 'gallery', id: 'h-gallery' }));
+  renderGallery(it);
+}
+function renderGallery(it) {
+  const g = $('#h-gallery'); if (!g) return;
+  H.galleryDirty = false;
+  const ans = H.report.answers[it.id] || {}, bg = hostImg(mediaIdFor(it)), aspect = drawAspect(it);
+  const rows = Object.entries(ans).sort((a, b) => naturalSort((H.students.get(a[0]) || {}).name || '', (H.students.get(b[0]) || {}).name || ''));
+  g.replaceChildren();
+  if (!rows.length) { g.append(el('p', { class: 'muted' }, 'Drawings appear here as students send them. Only you can see them.')); return; }
+  rows.forEach(([sid, r]) => {
+    const st = H.students.get(sid);
+    g.append(el('figure', { class: 'thumb-card' }, renderDrawing(document.createElement('canvas'), r.raw.s, bg, aspect, 240),
+      el('figcaption', { class: 'sname', text: st ? st.name : 'Student' })));
+  });
+}
+
+/* ---- teacher: download drawings as one page saved on this computer ---- */
+async function downloadDrawings(qids, report, lesson) {
+  const r = report || H.report, items = lesson ? lesson.items : (H ? H.items : []);
+  const parts = [], made = [];
+  for (const qid of qids) {
+    const it = items.find(x => x.id === qid), q = r.questions.find(x => x.qid === qid);
+    let img = null;
+    if (it && it.bg) { const u = URL.createObjectURL(it.bg); made.push(u); img = new Image(); img.src = u; await img.decode().catch(() => {}); }
+    const aspect = it ? drawAspect(it) : 4 / 3;
+    const ans = Object.entries(r.answers[qid] || {}).sort((a, b) => naturalSort((r.students[a[0]] || {}).name || '', (r.students[b[0]] || {}).name || ''));
+    const figs = ans.map(([sid, a]) => {
+      const url = renderDrawing(document.createElement('canvas'), a.raw.s, img, aspect, 800).toDataURL('image/jpeg', 0.85);
+      const name = (r.students[sid] || {}).name || 'Student';
+      return '<figure><img src="' + url + '" alt=""><figcaption>' + escapeHTML(name) + '</figcaption></figure>';
+    });
+    parts.push('<h2>' + escapeHTML((q ? 'Question ' + q.n + ': ' + q.text : 'Drawing question')) + '</h2>' + (figs.join('') || '<p>No drawings.</p>'));
+  }
+  made.forEach(u => URL.revokeObjectURL(u));
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sidekick Live drawings</title><style>body{font-family:system-ui,sans-serif;margin:24px;color:#1E2B4A}figure{display:inline-block;margin:8px;width:300px;vertical-align:top}img{width:100%;border:1px solid #ccd}figcaption{font-weight:600}</style></head><body><h1>Sidekick Live drawings</h1><p>' +
+    escapeHTML(r.lesson + ' · ' + new Date(r.started).toLocaleString()) + ' · saved on this computer only</p>' + parts.join('') + '</body></html>';
+  download('sidekick-live-drawings-' + dateStamp() + '.html', html, 'text/html;charset=utf-8');
+}
+function escapeHTML(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
+
+/* =====================================================================
+   17. DOT MAP ("tap the picture")
+   Each student places one dot (tap again to move it). Dots never carry names on any shared screen.
+   Areas (zones) are boxes on the picture: { x, y, w, h, l: label, correct } in 0–10000 units.
+   ===================================================================== */
+const ZONE_PRESETS = {
+  none: { label: 'No areas', make: () => [] },
+  cols2: { label: '2 columns (left / right)', make: () => cols(2) },
+  cols3: { label: '3 columns', make: () => cols(3) },
+  cols4: { label: '4 columns', make: () => cols(4) },
+  rows2: { label: '2 rows (top / bottom)', make: () => [0, 1].map(i => ({ x: 0, y: i * 5000, w: 10000, h: 5000 })) },
+  quad: { label: '4 quadrants', make: () => [[0, 0], [5000, 0], [0, 5000], [5000, 5000]].map(([x, y]) => ({ x, y, w: 5000, h: 5000 })) },
+  own: { label: 'Draw my own boxes', make: () => [] }
+};
+function cols(n) { const w = Math.floor(10000 / n); return Array.from({ length: n }, (_, i) => ({ x: i * w, y: 0, w: i === n - 1 ? 10000 - i * w : w, h: 10000 })); }
+function zoneHit(z, x, y) { return x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h; }
+function dotCounts(zones, pts) { return { total: pts.length, per: zones.map(z => pts.filter(p => zoneHit(z, p[0], p[1])).length) }; }
+function pctText(n, total) { return total ? Math.round(100 * n / total) + '%' : '0%'; }
+
+/* Draw areas + dots onto a canvas. o = { zones, counts, pts, mine, reveal } */
+function paintDotMap(c, o) {
+  if (!c || !c.isConnected) return;
+  const [W, Hh] = fitCanvas(c), x = c.getContext('2d');
+  x.clearRect(0, 0, W, Hh);
+  const sx = v => v / 10000 * W, sy = v => v / 10000 * Hh, fs = Math.max(13, Math.round(W / 42));
+  (o.zones || []).forEach((z, i) => {
+    x.save();
+    if (o.reveal && z.c) { x.fillStyle = 'rgba(19,124,114,.18)'; x.fillRect(sx(z.x), sy(z.y), sx(z.w), sy(z.h)); }
+    x.setLineDash([8, 6]); x.lineWidth = Math.max(2, W / 400); x.strokeStyle = o.reveal && z.c ? '#137C72' : 'rgba(30,43,74,.55)';
+    x.strokeRect(sx(z.x) + 2, sy(z.y) + 2, sx(z.w) - 4, sy(z.h) - 4);
+    const label = (z.l || '') + (o.counts ? '  ' + pctText(o.counts.per[i], o.counts.total) : '') + (o.reveal && z.c ? '  ✓' : '');
+    if (label.trim()) {
+      x.font = '700 ' + fs + 'px Lexend, system-ui, sans-serif';
+      const tw = x.measureText(label).width;
+      x.fillStyle = 'rgba(255,255,255,.88)'; x.fillRect(sx(z.x) + 6, sy(z.y) + 6, tw + 14, fs + 12);
+      x.fillStyle = '#1E2B4A'; x.fillText(label, sx(z.x) + 13, sy(z.y) + fs + 9);
+    }
+    x.restore();
+  });
+  const r = Math.max(5, W * 0.011);
+  for (const p of o.pts || []) {
+    x.beginPath(); x.arc(sx(p[0]), sy(p[1]), r, 0, Math.PI * 2);
+    x.fillStyle = 'rgba(31,111,209,.55)'; x.fill(); x.lineWidth = 1.5; x.strokeStyle = '#fff'; x.stroke();
+  }
+  if (o.mine) {
+    x.beginPath(); x.arc(sx(o.mine[0]), sy(o.mine[1]), r * 1.6, 0, Math.PI * 2);
+    x.fillStyle = '#FFC53D'; x.fill(); x.lineWidth = 3; x.strokeStyle = '#1E2B4A'; x.stroke();
+  }
+}
+
+/* ---------- student ---------- */
+function buildDotMap(v) {
+  const locked = v.phase !== 'open';
+  const card = el('div', { class: 'q-card draw-card' }, el('div', { class: 'q-text', text: v.prompt || 'Tap the picture.' }));
+  if (prefs.read) card.append(readBtn(() => v.read || v.prompt || 'Tap the picture.'));
+  if (!(v.qid in S.dotMine)) S.dotMine[v.qid] = v.mine || null;
+  const frame = el('div', { class: 'draw-frame' }); frame.style.aspectRatio = String(v.aspect || 4 / 3); frame.style.setProperty('--ar', String(v.aspect || 4 / 3));
+  if (v.bg) { const u = mediaUrl(v.bg); frame.append(u ? el('img', { src: u, alt: '' }) : el('div', { class: 'slide-loading' }, 'Loading picture…')); }
+  const c = el('canvas', { class: 'ink-layer draw-layer dot-layer' + (locked ? '' : ' active'), 'aria-label': 'Tap to place your dot' });
+  frame.append(c);
+  const note = el('span', { class: 'sent-note', id: 'q-sent', 'aria-live': 'polite' });
+  const paint = () => {
+    const sh = S.view && S.view.qid === v.qid ? S.view.share : v.share;
+    paintDotMap(c, { zones: v.zones, counts: sh && sh.counts, pts: sh ? sh.pts : [], mine: S.dotMine[v.qid], reveal: !!v.reveal });
+  };
+  c._redraw = paint; S.dotPaint = paint;
+  requestAnimationFrame(paint);
+  const place = (x, y) => {
+    if (locked) return;
+    S.dotMine[v.qid] = [x, y]; paint();
+    const msg = { t: 'ans', qid: v.qid, a: { x, y } };
+    S.pendingAns = msg; S.ackQid = null;
+    note.textContent = sendHost(msg) ? 'Sending…' : 'Not connected — it will send when you’re back.';
+  };
+  if (!locked) c.addEventListener('pointerdown', e => { e.preventDefault(); const [x, y] = canvasPos(c, e); place(x, y); });
+  card.append(frame);
+  if (!locked && v.zones && v.zones.length && v.zones.some(z => z.l)) {
+    card.append(el('div', { class: 'zone-btns' }, el('span', { class: 'muted' }, 'Or choose: '),
+      v.zones.filter(z => z.l).map(z => el('button', { class: 'chip', type: 'button', onclick: () => place(Math.round(z.x + z.w / 2), Math.round(z.y + z.h / 2)) }, z.l))));
+  }
+  if (v.reveal) {
+    card.append(el('div', { class: 'result-mine' }, v.reveal.correct == null ? 'You didn’t place a dot.' : v.reveal.correct ? '✓ Your dot is in the right spot!' : 'Not quite. The green box shows the right spot.'));
+  }
+  if (!locked) { card.append(el('div', { class: 'q-actions' }, note)); note.textContent = S.dotMine[v.qid] ? 'Your dot is in ✓ Tap somewhere else to move it.' : 'Tap to place your dot.'; }
+  else card.append(el('p', { class: 'muted' }, 'Dots are closed.'));
+  card.append(el('p', { class: 'muted' }, v.share ? 'This is the class dot map. No names are shown. Your dot is yellow.' : 'Only your teacher sees where you tapped.'));
+  return card;
+}
+function onDotShare(m) {
+  if (!S.view || S.view.k !== 'dots' || S.view.qid !== m.qid) return;
+  const wasShared = !!S.view.share;
+  S.view.share = m.share;
+  if (wasShared !== !!m.share) renderStudent(); else if (S.dotPaint) S.dotPaint();
+}
+
+/* ---------- teacher ---------- */
+function dotState(it) { return (H.dotState[it.id] ||= { share: false, pct: false, reveal: false, showZones: it.showZones !== false }); }
+function dotPts(it) { return Object.values(H.report.answers[it.id] || {}).map(r => [r.raw.x, r.raw.y]); }
+function dotShareData(it) {
+  const ds = dotState(it), pts = dotPts(it);
+  return { pts, counts: ds.pct ? dotCounts(it.zones || [], pts) : null };
+}
+function dotZonesFor(it) {
+  const ds = dotState(it);
+  if (!(ds.showZones || ds.reveal || (ds.share && ds.pct))) return [];
+  return (it.zones || []).map(z => ({ x: z.x, y: z.y, w: z.w, h: z.h, l: z.l || '', c: ds.reveal ? !!z.correct : false }));
+}
+function dotAspect(it) { return it.bgW && it.bgH ? it.bgW / it.bgH : 4 / 3; }
+function dotsViewMsg(base, it, st) {
+  const ds = dotState(it), rec = (H.report.answers[it.id] || {})[st.id], hasCorrect = (it.zones || []).some(z => z.correct);
+  return { ...base, k: 'dots', qid: it.id, prompt: it.prompt || '', read: it.read || '', bg: mediaIdFor(it), aspect: dotAspect(it),
+    phase: H.phase[it.id] || 'open', mine: rec ? [rec.raw.x, rec.raw.y] : null, zones: dotZonesFor(it),
+    share: ds.share ? dotShareData(it) : null, reveal: ds.reveal && hasCorrect ? { correct: rec ? !!rec.correct : null } : null };
+}
+function dotAnswer(it, a) {
+  if (!a || typeof a !== 'object') return null;
+  const x = Math.round(Number(a.x)), y = Math.round(Number(a.y));
+  if (!(x >= 0 && x <= 10000 && y >= 0 && y <= 10000)) return null;
+  const zones = it.zones || [], hit = zones.filter(z => zoneHit(z, x, y)), graded = zones.some(z => z.correct);
+  const where = hit.length ? hit.map(z => z.l || 'Area ' + (zones.indexOf(z) + 1)).join(', ') : 'outside the areas';
+  return { raw: { x, y }, a: where + ' (' + Math.round(x / 100) + '% across, ' + Math.round(y / 100) + '% down)', correct: graded ? hit.some(z => z.correct) : null, t: Date.now() };
+}
+function renderDotStage(stage, it) {
+  const ds = dotState(it), ph = H.phase[it.id] || 'open', hasCorrect = (it.zones || []).some(z => z.correct), hasZones = (it.zones || []).length > 0;
+  stage.append(el('div', { class: 'q-card' }, el('div', { class: 'tag', text: 'Dot map' }), el('div', { class: 'q-text', text: it.prompt || 'Tap the picture.' })));
+  const tog = (label, key, after) => {
+    const i = el('input', { type: 'checkbox' }); i.checked = ds[key];
+    i.addEventListener('change', () => { ds[key] = i.checked; if (after) after(); broadcastView(); renderHostStage(); saveHostSnap(); });
+    return el('label', { class: 'check small' }, i, label);
+  };
+  stage.append(el('div', { class: 'host-q-meta' },
+    el('span', { class: 'count-pill', id: 'h-answered' }, ''),
+    ph === 'open' ? el('button', { class: 'btn btn-primary', onclick: () => setPhase('closed') }, 'Stop dots')
+                  : el('button', { class: 'btn', onclick: () => setPhase('open') }, 'Reopen dots')));
+  stage.append(el('div', { class: 'host-q-meta dot-toggles' },
+    hasZones ? tog('Show percentages', 'pct') : null,
+    tog('📣 Share the dot map with the class (no names)', 'share'),
+    hasZones ? tog('Show the areas to students', 'showZones') : null,
+    hasCorrect ? tog('✓ Reveal the right area', 'reveal') : null));
+  const frame = el('div', { class: 'draw-frame host-dot-frame' }); frame.style.aspectRatio = String(dotAspect(it)); frame.style.setProperty('--ar', String(dotAspect(it)));
+  const mid = mediaIdFor(it); if (mid) frame.append(el('img', { src: H.urls.get(mid), alt: '' }));
+  const c = el('canvas', { class: 'ink-layer draw-layer' }); frame.append(c);
+  stage.append(frame);
+  if (!hasZones) stage.append(el('p', { class: 'muted' }, 'Tip: add areas to this dot map in the lesson builder to get percentages.'));
+  H.dotPaint = () => {
+    const pts = dotPts(it);
+    paintDotMap(c, { zones: (it.zones || []).map(z => ({ ...z, c: !!z.correct })), counts: ds.pct ? dotCounts(it.zones || [], pts) : null, pts, reveal: ds.reveal });
+  };
+  c._redraw = H.dotPaint;
+  requestAnimationFrame(H.dotPaint);
+}
+function dotsTick(now) {
+  if (!H.dotsDirty || now - H.lastDots < 1000) return;
+  H.lastDots = now; H.dotsDirty = false;
+  const it = currentItem(); if (!it || it.kind !== 'dots') return;
+  if (H.dotPaint) H.dotPaint();
+  if (dotState(it).share) broadcast({ t: 'dm', qid: it.id, share: dotShareData(it) });
+}
+
+/* ---------- lesson builder: dot map setup + areas editor ---------- */
+function addDotsModal(fromSlide) {
+  const slides = B.lesson.items.filter(x => x.kind === 'slide');
+  openModal((card, close) => {
+    const prompt = el('input', { maxlength: 200 }); prompt.value = fromSlide ? 'Tap the slide.' : 'Tap where you think the answer is.';
+    let bg = fromSlide ? fromSlide.blob : null, bgW = fromSlide ? fromSlide.w : 0, bgH = fromSlide ? fromSlide.h : 0, mode = fromSlide ? 'slide' : 'blank';
+    const choose = el('div'), opts = el('div', { class: 'spin-opts' });
+    const radio = (v, label) => { const r = el('input', { type: 'radio', name: 'dot-bg', value: v }); if (v === mode) r.checked = true; r.addEventListener('change', () => { mode = v; paint(); }); return el('label', { class: 'check small' }, r, label); };
+    if (!fromSlide) opts.append(radio('blank', 'Blank (good for Agree / Disagree)'), slides.length ? radio('slide', 'One of my slides') : null, radio('image', 'A picture from my computer'));
+    const paint = () => {
+      choose.replaceChildren();
+      if (fromSlide) return;
+      if (mode === 'slide') {
+        const sel = el('select', { 'aria-label': 'Which slide' }, slides.map((s, k) => el('option', { value: String(k) }, 'Slide ' + (B.lesson.items.indexOf(s) + 1))));
+        const set = () => { const s = slides[+sel.value]; bg = s.blob; bgW = s.w; bgH = s.h; }; sel.addEventListener('change', set); set(); choose.append(sel);
+      } else if (mode === 'image') {
+        bg = null; choose.append(fileButton('Choose picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height); bg = r.blob; bgW = r.w; bgH = r.h; toast('Picture ready.'); } catch { toast('Could not read that picture.'); } }));
+      } else bg = null;
+    };
+    paint();
+    const preset = el('select', { 'aria-label': 'Areas' }, Object.entries(ZONE_PRESETS).map(([k, p]) => el('option', { value: k }, p.label)));
+    preset.value = fromSlide ? 'none' : 'cols2';
+    const labels = el('input', { maxlength: 200, placeholder: 'Agree, Disagree' }); labels.value = fromSlide ? '' : 'Agree, Disagree';
+    card.append(el('h2', null, 'Add a dot map'), el('label', null, 'What should students tap?'), prompt,
+      fromSlide ? el('p', { class: 'muted' }, 'Background: this slide') : el('label', null, 'Background'), opts, choose,
+      el('label', null, 'Areas (for percentages)'), preset,
+      el('label', null, 'Area names, in order, separated by commas (optional)'), labels,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          if (mode !== 'blank' && !bg) { toast('Choose a picture first.'); return; }
+          const names = labels.value.split(',').map(s => cleanText(s, 30).trim());
+          const zones = ZONE_PRESETS[preset.value].make().map((z, i) => ({ ...z, l: names[i] || '', correct: false }));
+          const it = { id: uid(), kind: 'dots', prompt: cleanText(prompt.value, 200).trim() || 'Tap the picture.', bg: mode === 'blank' ? null : bg, bgW: mode === 'blank' ? 0 : bgW, bgH: mode === 'blank' ? 0 : bgH, zones, showZones: true, read: '', notes: '' };
+          const at = fromSlide ? B.lesson.items.indexOf(fromSlide) + 1 : B.lesson.items.length;
+          B.lesson.items.splice(at, 0, it); saveLessonSoon(); renderBuilder(); close();
+          if (preset.value === 'own') editZones(it); else toast(fromSlide ? 'Dot map added after this slide.' : 'Dot map added at the end. Use ▲ to move it.');
+        } }, 'Add'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
+  });
+}
+function editZones(it) {
+  const zones = (it.zones || []).map(z => ({ ...z }));
+  openModal((card, close) => {
+    const frame = el('div', { class: 'draw-frame zone-editor' }); const ar = it.bgW && it.bgH ? it.bgW / it.bgH : 16 / 9;
+    frame.style.aspectRatio = String(ar); frame.style.setProperty('--ar', String(ar));
+    let url = null; if (it.bg) { url = URL.createObjectURL(it.bg); frame.append(el('img', { src: url, alt: '' })); }
+    const c = el('canvas', { class: 'ink-layer active' }); frame.append(c);
+    const list = el('div', { class: 'zone-list' });
+    let drag = null;
+    const paint = (extra) => paintDotMap(c, { zones: zones.map(z => ({ ...z, c: z.correct })).concat(extra ? [extra] : []), reveal: true, pts: [] });
+    const draw = () => {
+      list.replaceChildren();
+      if (!zones.length) list.append(el('p', { class: 'muted' }, 'Drag on the picture to draw a box. Draw up to 8.'));
+      zones.forEach((z, i) => {
+        const name = el('input', { maxlength: 30, placeholder: 'Area ' + (i + 1), 'aria-label': 'Area name' }); name.value = z.l || '';
+        name.addEventListener('input', () => { z.l = name.value; paint(); });
+        const ok = el('input', { type: 'checkbox' }); ok.checked = !!z.correct; ok.addEventListener('change', () => { z.correct = ok.checked; paint(); });
+        list.append(el('div', { class: 'zone-row' }, el('strong', null, (i + 1) + '.'), name, el('label', { class: 'check small' }, ok, 'Right answer'),
+          el('button', { class: 'btn btn-small btn-danger', 'aria-label': 'Delete area', onclick: () => { zones.splice(i, 1); draw(); } }, '✕')));
+      });
+      requestAnimationFrame(() => paint());
+    };
+    c.addEventListener('pointerdown', e => { if (zones.length >= 8) { toast('8 areas is the most.'); return; } e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ } const [x, y] = canvasPos(c, e); drag = { x0: x, y0: y }; });
+    c.addEventListener('pointermove', e => { if (!drag) return; const [x, y] = canvasPos(c, e); drag.z = { x: Math.min(x, drag.x0), y: Math.min(y, drag.y0), w: Math.abs(x - drag.x0), h: Math.abs(y - drag.y0), l: '' }; paint(drag.z); });
+    c.addEventListener('pointerup', () => { if (drag && drag.z && drag.z.w > 300 && drag.z.h > 300) zones.push({ ...drag.z, l: '', correct: false }); drag = null; draw(); });
+    card.classList.add('wide');
+    card.append(el('h2', null, 'Areas for this dot map'), el('p', { class: 'muted' }, 'Drag to draw boxes. Name them for percentages. Tick “Right answer” to let students check their dot when you reveal it.'),
+      frame, list,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => { it.zones = zones; if (zones.some(z => z.correct)) { it.showZones = false; toast('Areas are hidden from students so the answer stays secret. Reveal it during class.'); } saveLessonSoon(); renderBuilder(); if (url) URL.revokeObjectURL(url); card.classList.remove('wide'); close(); } }, 'Save areas'),
+        el('button', { class: 'btn', onclick: () => { zones.length = 0; draw(); } }, 'Remove all'),
+        el('button', { class: 'btn btn-ghost', onclick: () => { if (url) URL.revokeObjectURL(url); card.classList.remove('wide'); close(); } }, 'Cancel')));
+    draw();
+  });
+}
 
 /* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
@@ -1516,7 +2336,7 @@ async function resumeHost(snap) {
 function quickLesson() { return { id: 'quick', name: 'Activities-only session', items: [] }; }
 function setTab(tab) {
   currentTab = tab;
-  document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.tab === tab)));
+  document.querySelectorAll('#screen-dash .tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.tab === tab)));
   ['lessons', 'sets', 'report', 'settings'].forEach(t => { $('#tab-' + t).hidden = t !== tab; });
   ({ lessons: renderLessons, sets: renderSets, report: renderReport, settings: renderSettings })[tab]();
 }
@@ -1568,12 +2388,21 @@ async function exportLesson(l) {
   toast('Preparing lesson file…');
   const items = [];
   for (const it of l.items) {
-    if (it.kind === 'slide') { const { blob, ...rest } = it; items.push({ ...rest, data: await blobToDataURL(blob) }); }
-    else items.push(it);
+    const { blob, img, bg, ...rest } = it;
+    if (blob) rest.data = await blobToDataURL(blob);
+    if (img) rest.imgData = await blobToDataURL(img);
+    if (bg) rest.bgData = await blobToDataURL(bg);
+    items.push(rest);
   }
   download(l.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.sidekick-lesson.json',
     JSON.stringify({ app: APP, kind: 'lesson', version: 1, name: l.name, items }), 'application/json');
 }
+function cleanZones(z) {
+  if (!Array.isArray(z)) return [];
+  const n = v => Math.max(0, Math.min(10000, Math.round(Number(v) || 0)));
+  return z.slice(0, 8).map(q => ({ x: n(q.x), y: n(q.y), w: n(q.w), h: n(q.h), l: cleanText(q.l, 30), correct: !!q.correct }));
+}
+function okImg(s) { return typeof s === 'string' && /^data:image\/(webp|jpeg|png);base64,/.test(s); }
 async function importLesson(file) {
   try {
     if (file.size > 60 * 1024 * 1024) throw new Error('That file is too large.');
@@ -1581,12 +2410,17 @@ async function importLesson(file) {
     if (d.app !== APP || d.kind !== 'lesson' || !Array.isArray(d.items)) throw new Error('This isn’t a Sidekick Live lesson file.');
     const items = [];
     for (const it of d.items.slice(0, 200)) {
-      const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600) };
+      const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup };
       if (it.kind === 'slide' && typeof it.data === 'string' && /^data:image\/(webp|jpeg|png);base64,/.test(it.data)) {
         const blob = await (await fetch(it.data)).blob(); items.push({ ...base, kind: 'slide', blob, w: +it.w || 0, h: +it.h || 0 });
       } else if (it.kind === 'text') items.push({ ...base, kind: 'text', title: cleanText(it.title, 120), body: cleanText(it.body, 2000) });
       else if (it.kind === 'check') items.push({ ...base, kind: 'check', prompt: cleanText(it.prompt, 200) });
-      else if (it.kind === 'q' && it.q) items.push({ ...base, kind: 'q', q: normalizeQuestion({ ...it.q, question: it.q.text }) });
+      else if (it.kind === 'q' && it.q) items.push({ ...base, kind: 'q', q: normalizeQuestion({ ...it.q, question: it.q.text }), signup: !!it.signup,
+        ...(okImg(it.imgData) ? { img: await (await fetch(it.imgData)).blob(), imgW: +it.imgW || 0, imgH: +it.imgH || 0 } : {}) });
+      else if (it.kind === 'dots') items.push({ ...base, kind: 'dots', prompt: cleanText(it.prompt, 200), showZones: it.showZones !== false, zones: cleanZones(it.zones),
+        ...(okImg(it.bgData) ? { bg: await (await fetch(it.bgData)).blob(), bgW: +it.bgW || 0, bgH: +it.bgH || 0 } : { bg: null }) });
+      else if (it.kind === 'draw') items.push({ ...base, kind: 'draw', prompt: cleanText(it.prompt, 200), signup: !!it.signup,
+        ...(okImg(it.bgData) ? { bg: await (await fetch(it.bgData)).blob(), bgW: +it.bgW || 0, bgH: +it.bgH || 0 } : { bg: null }) });
     }
     await Lessons.put({ id: uid(), name: cleanText(d.name, 60) || 'Imported lesson', items, updated: Date.now() });
     toast('Lesson imported.'); renderLessons();
@@ -1599,7 +2433,7 @@ function renderSets() {
   p.append(el('div', { class: 'toolbar' },
     el('button', { class: 'btn btn-primary', onclick: async () => { const n = await askText('New question set', '', 'Set name'); if (n) { const all = Sets.all(); all.push({ id: uid(), name: n, questions: [] }); Sets.save(all); renderSets(); } } }, 'New set'),
     fileButton('Import (.json or .csv)', '.json,.csv,application/json,text/csv', f => importSetFile(f, null)),
-    el('button', { class: 'btn', onclick: () => download('sidekick-live-question-template.csv', toCSV(CSV_TEMPLATE)) }, 'Download CSV template')));
+    el('button', { class: 'btn', onclick: downloadTemplate }, 'Download question template')));
   const all = Sets.all();
   if (!all.length) { p.append(el('div', { class: 'empty' }, 'No question sets yet. Use the same question template as your classroom games: fill it in, download it as CSV, then choose “Import”.')); return; }
   const ul = el('ul', { class: 'item-list' });
@@ -1619,26 +2453,50 @@ function renderSets() {
 }
 function fileSafe(s) { return String(s).replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'set'; }
 function saveSet(set) { const all = Sets.all(); const i = all.findIndex(s => s.id === set.id); if (i >= 0) all[i] = set; else all.push(set); Sets.save(all); }
+function downloadTemplate() { download('sidekick-live-question-template.csv', toCSV(CSV_TEMPLATE)); }
+function formatErrorBox(detail) {
+  openModal((card, close) => card.append(
+    el('h2', null, '⚠️ Incorrect format'),
+    el('p', null, 'This file doesn’t match the question template. Please download the template above, fill it in, and import it again.'),
+    detail ? el('p', { class: 'muted', text: detail }) : null,
+    el('div', { class: 'spin-buttons' },
+      el('button', { class: 'btn btn-primary', onclick: () => { downloadTemplate(); close(); } }, 'Download question template'),
+      el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Close'))));
+}
 async function importSetFile(file, intoId) {
+  let text = '';
   try {
-    if (file.size > 2 * 1024 * 1024) throw new Error('That file is too large.');
-    const text = await file.text();
-    let incoming = [], errors = [], name = file.name.replace(/\.(csv|json)$/i, '');
+    if (file.size > 2 * 1024 * 1024) { formatErrorBox('That file is too large for a question set.'); return; }
+    if (/\.xlsx?$/i.test(file.name)) { formatErrorBox('This is an Excel file. In Excel or Google Sheets, download the Questions tab as a CSV file first.'); return; }
+    text = await file.text();
+  } catch { formatErrorBox(); return; }
+  let incoming = [], errors = [], name = file.name.replace(/\.(csv|json)$/i, '');
+  try {
     if (/\.json$/i.test(file.name) || text.trim().startsWith('{') || text.trim().startsWith('[')) {
       const d = JSON.parse(text);
       const raw = Array.isArray(d) ? d : (d.questions || []);
       if (d.name) name = cleanText(d.name, 60);
       raw.forEach((q, i) => { try { incoming.push(normalizeQuestion({ ...q, question: q.question ?? q.text })); } catch (e) { errors.push('Question ' + (i + 1) + ': ' + e.message); } });
     } else ({ questions: incoming, errors } = questionsFromCSV(text));
-    if (!incoming.length) throw new Error(errors[0] || 'No questions found.');
-    if (intoId) { const set = Sets.get(intoId); set.questions.push(...incoming); saveSet(set); }
-    else { const all = Sets.all(); all.push({ id: uid(), name, questions: incoming }); Sets.save(all); }
-    renderSets();
-    if (errors.length) openModal((card, close) => card.append(el('h2', null, 'Imported ' + incoming.length + ' questions'),
-      el('p', null, errors.length + ' row(s) were skipped:'), el('ul', null, errors.slice(0, 20).map(e => el('li', { text: e }))),
-      el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-primary', onclick: () => close() }, 'OK'))));
-    else toast('Imported ' + incoming.length + ' questions.');
-  } catch (e) { toast('Import failed: ' + e.message); }
+  } catch (e) { formatErrorBox(e.format ? null : 'The file could not be read.'); return; }
+  const rowList = () => el('ul', null, errors.slice(0, 20).map(e => el('li', { text: e })), errors.length > 20 ? el('li', null, '…and ' + (errors.length - 20) + ' more') : null);
+  if (!incoming.length) {
+    openModal((card, close) => card.append(el('h2', null, '⚠️ Incorrect format: nothing was imported'),
+      el('p', null, 'None of the rows match the question template. Please download the template above, check each row’s Check column says OK, and import it again.'),
+      errors.length ? rowList() : null,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => { downloadTemplate(); close(); } }, 'Download question template'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Close'))));
+    return;
+  }
+  if (intoId) { const set = Sets.get(intoId); set.questions.push(...incoming); saveSet(set); }
+  else { const all = Sets.all(); all.push({ id: uid(), name, questions: incoming }); Sets.save(all); }
+  renderSets();
+  if (errors.length) openModal((card, close) => card.append(el('h2', null, 'Imported ' + incoming.length + ' questions'),
+    el('p', null, errors.length + ' row(s) were skipped because they don’t match the template. Fix these rows (their Check column should say OK) and import them again:'),
+    rowList(),
+    el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-primary', onclick: () => close() }, 'OK'))));
+  else toast('Imported ' + incoming.length + ' questions.');
 }
 
 /* ---- Report tab ---- */
@@ -1648,14 +2506,16 @@ function reportRows(r) {
   const detail = [['Student', 'Question #', 'Type', 'Question', 'Answer', 'Correct', 'Time']];
   const summary = [['Student', 'Questions answered', 'Correct', 'Percent correct', 'Times shared on mic', 'Check-ins']];
   for (const [sid, s] of studs) {
-    let answered = 0, correct = 0;
+    let answered = 0, correct = 0, ungraded = 0;
     for (const q of qs) {
       const a = (r.answers[q.qid] || {})[sid];
       if (a) { answered++; if (a.correct) correct++; }
-      detail.push([s.name, q.n, TYPE_LABEL[q.type], q.text, a ? a.a : '(no answer)', a ? (a.correct ? 'Yes' : 'No') : '', a ? new Date(a.t).toLocaleTimeString() : '']);
+      const graded = q.type !== 'draw' && !(q.type === 'dots' && !q.graded);
+      if (a && !graded) answered--, ungraded++;
+      detail.push([s.name, q.n, TYPE_LABEL[q.type], q.text, a ? a.a : '(no answer)', a && graded ? (a.correct ? 'Yes' : 'No') : '', a ? new Date(a.t).toLocaleTimeString() : '']);
     }
     const checks = Object.values(r.checkins || {}).map(c => c.votes[sid]).filter(Boolean).map(v => (CHECKIN.find(c => c.v === v) || {}).label);
-    summary.push([s.name, answered, correct, answered ? Math.round(100 * correct / answered) + '%' : '', s.shared || 0, checks.join(', ')]);
+    summary.push([s.name, answered + ungraded, correct, answered ? Math.round(100 * correct / answered) + '%' : '', s.shared || 0, checks.join(', ')]);
   }
   for (const m of r.manual || []) summary.push([m.name + ' (added by teacher)', '', '', '', m.shared || 0, '']);
   return { detail, summary };
@@ -1675,6 +2535,10 @@ function renderReport() {
     el('div', { class: 'toolbar' },
       el('button', { class: 'btn btn-primary', onclick: () => download('sidekick-live-answers-' + stamp + '.csv', toCSV(detail)) }, 'Download answers CSV'),
       el('button', { class: 'btn', onclick: () => download('sidekick-live-summary-' + stamp + '.csv', toCSV(summary)) }, 'Download summary CSV'),
+      r.questions.some(q => q.type === 'draw') ? el('button', { class: 'btn', onclick: async () => {
+        const lesson = r.lessonId ? await Lessons.get(r.lessonId).catch(() => null) : null;
+        downloadDrawings(r.questions.filter(q => q.type === 'draw').map(q => q.qid), r, lesson || { items: [] });
+      } }, '⬇ Download drawings') : null,
       el('button', { class: 'btn btn-danger', onclick: async () => { if (await confirmBox('Delete this report?', 'Download the CSVs first if you need them. This can’t be undone.')) { localStorage.removeItem(KEYS.report); renderReport(); } } }, 'Delete report')),
     el('h3', null, 'Summary'), tableFrom(summary), el('h3', null, 'Answers'), tableFrom(detail));
 }
@@ -1714,10 +2578,14 @@ function renderBuilder() {
   B.urls.forEach(u => URL.revokeObjectURL(u)); B.urls = [];
   const list = $('#bld-list'); list.replaceChildren();
   const items = B.lesson.items;
-  if (!items.length) list.append(el('li', { class: 'empty', style: 'display:block' }, 'Add your exported slides (images or a PDF), then add questions and check-ins between them.'));
+  const blobUrl = b => { const u = URL.createObjectURL(b); B.urls.push(u); return u; };
+  if (!items.length) list.append(el('li', { class: 'empty', style: 'display:block' }, 'Add your exported slides (images or a PDF), then add questions, drawing questions and check-ins between them.'));
   items.forEach((it, i) => {
     let thumb;
-    if (it.kind === 'slide') { const u = URL.createObjectURL(it.blob); B.urls.push(u); thumb = el('img', { class: 'thumb', src: u, alt: 'Slide ' + (i + 1) }); }
+    if (it.kind === 'slide') thumb = el('img', { class: 'thumb', src: blobUrl(it.blob), alt: 'Slide ' + (i + 1) });
+    else if (it.kind === 'draw') thumb = it.bg ? el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.bg), alt: '' }), el('span', null, '✏️ Drawing')) : el('div', { class: 'thumb' }, '✏️ Drawing (blank)');
+    else if (it.kind === 'dots') thumb = it.bg ? el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.bg), alt: '' }), el('span', null, '📍 Dot map')) : el('div', { class: 'thumb' }, '📍 Dot map');
+    else if (it.kind === 'q' && it.img) thumb = el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.img), alt: '' }), el('span', null, '❓ ' + TYPE_LABEL[it.q.type]));
     else thumb = el('div', { class: 'thumb' }, { text: '📝 Text slide', q: '❓ ' + TYPE_LABEL[it.q && it.q.type], check: '😀 Check-in' }[it.kind]);
     const fields = el('div', { class: 'bld-fields' });
     const field = (label, key, multi, max) => {
@@ -1727,14 +2595,65 @@ function renderBuilder() {
     };
     if (it.kind === 'text') { field('Title', 'title', false, 120); field('Text', 'body', true, 2000); }
     if (it.kind === 'check') field('Check-in question', 'prompt', false, 200);
-    if (it.kind === 'q') fields.append(el('div', null, el('span', { class: 'tag', text: TYPE_LABEL[it.q.type] }), ' ', it.q.text));
-    if (it.kind === 'slide' || it.kind === 'text') field('Read-aloud text (students tap 🔊)', 'read', true, 600);
+    if (it.kind === 'draw') field('Drawing question (what students should draw or mark)', 'prompt', false, 200);
+    if (it.kind === 'dots') {
+      field('Dot map question (what students should tap)', 'prompt', false, 200);
+      const sz = el('input', { type: 'checkbox' }); sz.checked = it.showZones !== false; sz.addEventListener('change', () => { it.showZones = sz.checked; saveLessonSoon(); });
+      fields.append(el('div', { class: 'row-inline' }, el('button', { class: 'btn btn-small', onclick: () => editZones(it) }, '▭ Edit areas (' + (it.zones || []).length + ')'),
+        el('label', { class: 'check small' }, sz, 'Students see the areas')));
+    }
+    if (it.kind === 'q') {
+      fields.append(el('div', null, el('span', { class: 'tag', text: TYPE_LABEL[it.q.type] }), ' ', it.q.text));
+      fields.append(el('div', { class: 'row-inline' }, it.img
+        ? el('button', { class: 'btn btn-small', onclick: () => { delete it.img; delete it.imgW; delete it.imgH; saveLessonSoon(); renderBuilder(); } }, 'Remove picture')
+        : fileButton('🖼 Add picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height, 960, 0.8); it.img = r.blob; it.imgW = r.w; it.imgH = r.h; saveLessonSoon(); renderBuilder(); } catch { toast('Could not read that picture.'); } })));
+    }
+    if (it.kind === 'slide' || it.kind === 'text' || it.kind === 'draw' || it.kind === 'dots') field('Read-aloud text (students tap 🔊)', 'read', true, 600);
     field('Teacher notes (only you see these)', 'notes', true, 1000);
-    const move = (d) => { const j = i + d; if (j < 0 || j >= items.length) return; [items[i], items[j]] = [items[j], items[i]]; saveLessonSoon(); renderBuilder(); };
+    const su = el('input', { type: 'checkbox' }); su.checked = !!it.signup;
+    su.addEventListener('change', () => { it.signup = su.checked; saveLessonSoon(); });
+    fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
+    const move = (dd) => { const j = i + dd; if (j < 0 || j >= items.length) return; [items[i], items[j]] = [items[j], items[i]]; saveLessonSoon(); renderBuilder(); };
     list.append(el('li', null, thumb, fields, el('div', { class: 'bld-actions' },
       el('button', { class: 'btn btn-small', 'aria-label': 'Move up', disabled: i === 0, onclick: () => move(-1) }, '▲'),
       el('button', { class: 'btn btn-small', 'aria-label': 'Move down', disabled: i === items.length - 1, onclick: () => move(1) }, '▼'),
+      it.kind === 'slide' ? el('button', { class: 'btn btn-small', title: 'Add a drawing question right after this slide, with this slide as the picture', onclick: () => {
+        items.splice(i + 1, 0, { id: uid(), kind: 'draw', prompt: 'Mark up this slide.', bg: it.blob, bgW: it.w, bgH: it.h, read: '', notes: '' });
+        saveLessonSoon(); renderBuilder(); toast('Drawing question added after this slide.'); } }, '✏️ Draw on it') : null,
+      it.kind === 'slide' ? el('button', { class: 'btn btn-small', title: 'Add a dot map right after this slide, using this slide', onclick: () => addDotsModal(it) }, '📍 Dot map on it') : null,
       el('button', { class: 'btn btn-small btn-danger', 'aria-label': 'Remove item', onclick: () => { items.splice(i, 1); saveLessonSoon(); renderBuilder(); } }, '✕'))));
+  });
+}
+function addDrawModal() {
+  const slides = B.lesson.items.filter(x => x.kind === 'slide');
+  openModal((card, close) => {
+    const prompt = el('input', { maxlength: 200, value: '' }); prompt.value = 'Draw your answer.';
+    let bg = null, bgW = 0, bgH = 0, mode = 'blank';
+    const opts = el('div', { class: 'spin-opts' });
+    const choose = el('div');
+    const radio = (v, label) => { const r = el('input', { type: 'radio', name: 'draw-bg', value: v }); if (v === mode) r.checked = true; r.addEventListener('change', () => { mode = v; paint(); }); return el('label', { class: 'check small' }, r, label); };
+    opts.append(radio('blank', 'Blank page'), slides.length ? radio('slide', 'One of my slides') : null, radio('image', 'A picture from my computer'));
+    const paint = () => {
+      choose.replaceChildren();
+      if (mode === 'slide') {
+        const sel = el('select', { 'aria-label': 'Which slide' }, slides.map((s, k) => el('option', { value: String(k) }, 'Slide ' + (B.lesson.items.indexOf(s) + 1))));
+        const set = () => { const s = slides[+sel.value]; bg = s.blob; bgW = s.w; bgH = s.h; };
+        sel.addEventListener('change', set); set(); choose.append(sel);
+      } else if (mode === 'image') {
+        bg = null;
+        choose.append(fileButton('Choose picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height); bg = r.blob; bgW = r.w; bgH = r.h; toast('Picture ready.'); } catch { toast('Could not read that picture.'); } }));
+      } else bg = null;
+    };
+    paint();
+    card.append(el('h2', null, 'Add a drawing question'), el('label', null, 'What should students draw or mark?'), prompt,
+      el('label', null, 'Background'), opts, choose,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          if (mode !== 'blank' && !bg) { toast('Choose a picture first.'); return; }
+          B.lesson.items.push({ id: uid(), kind: 'draw', prompt: cleanText(prompt.value, 200).trim() || 'Draw your answer.', bg: mode === 'blank' ? null : bg, bgW, bgH, read: '', notes: '' });
+          saveLessonSoon(); renderBuilder(); close(); toast('Drawing question added at the end. Use ▲ to move it.');
+        } }, 'Add'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
   });
 }
 async function addSlideFiles(files) {
@@ -1795,7 +2714,7 @@ function init() {
   });
   document.addEventListener('keydown', e => {
     if (e.altKey && e.shiftKey && e.code === 'KeyT') { e.preventDefault(); openTeacher(); return; }
-    if (H && !$('#screen-host').hidden && $('#spin-overlay').hidden && $('#spot-overlay').hidden && $('#modal-overlay').hidden && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+    if (H && !$('#screen-host').hidden && $('#spin-overlay').hidden && $('#spot-overlay').hidden && $('#modal-overlay').hidden && $('#tools-overlay').hidden && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
       if (['ArrowRight', 'PageDown'].includes(e.key)) { e.preventDefault(); hostGo(H.pos + 1); }
       if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); hostGo(H.pos - 1); }
     }
@@ -1843,7 +2762,7 @@ function init() {
   window.addEventListener('online', () => { if (S.active) reconnectNow(); });
 
   // Dashboard
-  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => setTab(t.dataset.tab)));
+  document.querySelectorAll('#screen-dash .tab').forEach(t => t.addEventListener('click', () => setTab(t.dataset.tab)));
   $('#dash-exit').addEventListener('click', () => { ssDel(KEYS.teacherOk); show('screen-join'); });
   $('#bld-back').addEventListener('click', () => { if (B) { clearTimeout(B.saveT); Lessons.put(B.lesson).finally(() => enterDash('lessons')); } });
   $('#bld-start').addEventListener('click', async () => { clearTimeout(B.saveT); await Lessons.put(B.lesson); beginSession(B.lesson); });
@@ -1860,12 +2779,20 @@ function init() {
   $('#h-pause').addEventListener('click', e => toggleFlag('paused', e.currentTarget));
   $('#h-look').addEventListener('click', e => toggleFlag('look', e.currentTarget));
   $('#h-review').addEventListener('click', e => toggleFlag('review', e.currentTarget));
-  $('#h-pointer').addEventListener('click', e => { H.pointer = !H.pointer; e.currentTarget.setAttribute('aria-pressed', String(H.pointer)); $('#h-stage').classList.toggle('pointing', H.pointer); if (H.pointer) toast('Click the slide to point.'); });
+  $('#h-signup').addEventListener('click', () => setSignup(!H.signup));
+  $('#h-tools').addEventListener('click', () => openTools());
+  $('#h-timer').addEventListener('click', () => openTools('timer'));
+  $('#h-score').addEventListener('click', () => openTools('score'));
+  $('#tools-close').addEventListener('click', closeTools);
+  document.querySelectorAll('#tools-tabs .tab').forEach(b => b.addEventListener('click', () => { toolsTab = b.dataset.tool; renderTools(); }));
+  $('#tool-hide').addEventListener('click', () => { $('#tool-overlay').hidden = true; });
+  $('#bld-add-draw').addEventListener('click', addDrawModal);
+  $('#bld-add-dots').addEventListener('click', () => addDotsModal(null));
   $('#h-spin-open').addEventListener('click', openSpinner);
   $('#h-spot-open').addEventListener('click', openSpotlight);
   const copyBtn = el('button', { class: 'btn btn-small', onclick: () => {
     const link = joinURL() + '?room=' + H.code;
-    (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('Join link copied — paste it in Class chat.'), () => toast(link));
+    (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('Join link copied — paste it in the LL chat.'), () => toast(link));
   } }, 'Copy join link');
   $('.join-info').append(' ', copyBtn);
 
