@@ -275,7 +275,7 @@ function publicQ(q, qid) {
     case 'tf': p.options = ['True', 'False']; break;
     case 'wordbank': p.parts = q.text.split(/_{3,}/); p.bank = shuffle(q.choices); break;
     case 'order': { let s = shuffle(q.choices); for (let t = 0; t < 10 && s.every((x, i) => x === q.choices[i]); t++) s = shuffle(q.choices); p.items = s; break; }
-    case 'match': { const pr = pairs(q); p.lefts = pr.map(x => x[0]); p.rights = shuffle([...new Set(pr.map(x => x[1]))]); break; }
+    case 'match': { const pr = pairs(q); p.lefts = pr.map(x => x[0]); p.rights = shuffle(pr.map(x => x[1])); break; }
     case 'sort': { const pr = pairs(q); p.items = shuffle(pr.map(x => x[0])); p.groups = [...new Set(pr.map(x => x[1]))]; break; }
   }
   return p;
@@ -540,7 +540,7 @@ function onHostMsg(m) {
       S.deck = Array.isArray(m.deck) ? m.deck : []; S.vol = !!m.vol; S.stars = m.stars || 0;
       ssSet(KEYS.student, { room: S.room, first: S.first, initial: S.initial, token: S.token });
       setConn('ok', 'Connected'); $('#st-name').textContent = m.name; renderVol(); renderStars(false);
-      $('#spin-overlay').hidden = true;
+      $('#spin-overlay').hidden = true; $('#tool-overlay').hidden = true;
       if (S.pendingAns) { sendHost(S.pendingAns); }
       break;
     case 'reject':
@@ -718,60 +718,10 @@ function buildStudentQ(v) {
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
     body.append(inp);
     getAnswer = () => inp.value.trim(); complete = () => inp.value.trim().length > 0;
-  } else if (q.type === 'wordbank') {
-    const n = q.parts.length - 1;
-    const fill = new Array(n).fill(null);        // {word, ci}
-    const used = new Set();
-    if (Array.isArray(mine)) mine.forEach((w, i) => { const ci = q.bank.findIndex((b, j) => b === w && !used.has(j)); if (ci >= 0 && i < n) { fill[i] = { word: w, ci }; used.add(ci); } });
-    let target = null;
-    const sentence = el('div', { class: 'wb-sentence' }); const bank = el('div', { class: 'bank', role: 'group', 'aria-label': 'Word bank' });
-    const draw = () => {
-      sentence.replaceChildren(); bank.replaceChildren();
-      const nextEmpty = target != null ? target : fill.findIndex(f => !f);
-      q.parts.forEach((p, i) => {
-        sentence.append(p);
-        if (i < n) sentence.append(el('button', { class: 'blank' + (i === nextEmpty && !locked ? ' next' : ''), type: 'button', disabled: locked,
-          'aria-label': fill[i] ? 'Blank ' + (i + 1) + ': ' + fill[i].word + '. Tap to clear.' : 'Blank ' + (i + 1) + ', empty',
-          onclick: () => { if (fill[i]) { used.delete(fill[i].ci); fill[i] = null; target = i; } else target = i; draw(); } }, fill[i] ? fill[i].word : '\u00a0'));
-      });
-      q.bank.forEach((w, ci) => bank.append(el('button', { class: 'chip', type: 'button', disabled: locked || used.has(ci),
-        onclick: () => { const slot = target != null && !fill[target] ? target : fill.findIndex(f => !f); if (slot < 0) return; fill[slot] = { word: w, ci }; used.add(ci); target = null; draw(); } }, w)));
-    };
-    draw(); body.append(sentence, bank);
-    getAnswer = () => fill.map(f => f && f.word); complete = () => fill.every(Boolean);
-  } else if (q.type === 'order') {
-    let order = Array.isArray(mine) && mine.length === q.items.length ? mine.slice() : q.items.slice();
-    const list = el('ol', { class: 'order-list' });
-    const draw = (focusIdx, dir) => {
-      list.replaceChildren();
-      order.forEach((it, i) => list.append(el('li', null, el('span', null, it),
-        el('button', { class: 'btn', type: 'button', 'aria-label': 'Move ' + it + ' up', disabled: locked || i === 0, onclick: () => { [order[i - 1], order[i]] = [order[i], order[i - 1]]; draw(i - 1, 'up'); } }, '▲'),
-        el('button', { class: 'btn', type: 'button', 'aria-label': 'Move ' + it + ' down', disabled: locked || i === order.length - 1, onclick: () => { [order[i + 1], order[i]] = [order[i], order[i + 1]]; draw(i + 1, 'down'); } }, '▼'))));
-      if (focusIdx != null) { const b = list.children[focusIdx].querySelectorAll('button')[dir === 'up' ? 0 : 1]; if (b && !b.disabled) b.focus(); else list.children[focusIdx].querySelector('button:not(:disabled)')?.focus(); }
-    };
-    draw(); body.append(list);
-    getAnswer = () => order.slice(); complete = () => true;
-  } else if (q.type === 'match') {
-    const sel = {};
-    q.lefts.forEach(l => {
-      const s = el('select', { 'aria-label': 'Match for ' + l, disabled: locked },
-        el('option', { value: '' }, 'Choose…'), q.rights.map(r => el('option', { value: r }, r)));
-      if (mine && mine[l]) s.value = mine[l];
-      sel[l] = s; body.append(el('div', { class: 'pair-row' }, el('span', { class: 'left' }, l), s));
-    });
-    getAnswer = () => { const o = {}; for (const l of q.lefts) o[l] = sel[l].value; return o; };
-    complete = () => q.lefts.every(l => sel[l].value);
-  } else if (q.type === 'sort') {
-    const pick = {};
-    q.items.forEach(it => {
-      if (mine && mine[it]) pick[it] = mine[it];
-      const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Group for ' + it });
-      const btns = q.groups.map(g => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(pick[it] === g), disabled: locked,
-        onclick: () => { pick[it] = g; btns.forEach((b, k) => b.setAttribute('aria-pressed', String(q.groups[k] === g))); } }, g));
-      seg.append(...btns);
-      body.append(el('div', { class: 'sort-row' }, el('div', { class: 'item' }, it), seg));
-    });
-    getAnswer = () => ({ ...pick }); complete = () => q.items.every(it => pick[it]);
+  } else {
+    const ui = ({ wordbank: bankUI, order: orderUI, match: matchUI, sort: sortUI })[q.type](q, mine, locked);
+    body.append(ui.node);
+    getAnswer = ui.get; complete = ui.done;
   }
 
   const note = el('span', { class: 'sent-note', id: 'q-sent', 'aria-live': 'polite' });
@@ -844,19 +794,17 @@ function studentSpin(m) {
       S.spinDone = true;
       res.replaceChildren(el('span', null, m.win), el('span', { class: 'sub' }, 'is sharing next!'));
       if (S.you) res.append(youCard());
-      res.append(hideBtn());
     });
   } else if (m.ph === 'ready-open') {
     clearInterval(studentSpinTimer);
     vis.replaceChildren(el('div', { class: 'mystery', 'aria-hidden': 'true' }, '🎤'));
     const b = el('button', { class: 'vol-toggle', 'aria-pressed': String(S.vol), onclick: () => { toggleVol(); b.setAttribute('aria-pressed', String(S.vol)); } },
       el('span', { class: 'vol-box', 'aria-hidden': 'true' }), el('span', null, 'I’d like to share on the mic 🎤'));
-    res.replaceChildren(el('span', { class: 'sub' }, 'The share spinner is open.'), S.view && S.view.signup ? b : null, hideBtn());
+    res.replaceChildren(el('span', { class: 'sub' }, 'The share spinner is open.'), S.view && S.view.signup ? b : null);
   } else if (m.ph === 'skip') {
     res.replaceChildren(el('span', { class: 'sub' }, 'Let’s spin again!'));
   }
 }
-function hideBtn() { return el('div', null, el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { $('#spin-overlay').hidden = true; } }, 'Back to the lesson')); }
 function toggleVol() {
   if (!S.view || !S.view.signup) { toast('Share sign-up isn’t open right now.'); return; }
   S.vol = !S.vol; renderVol();
@@ -1289,6 +1237,8 @@ function hostGo(pos) {
   if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
   if (it && it.signup && !H.signup) setSignup(true, true);
   broadcast({ t: 'spot', items: null });
+  hideToolFromClass();
+  if (!$('#spin-overlay').hidden) closeSpinner();
   broadcastView(); renderHostStage(); renderHostSide(); saveHostSnap();
 }
 function setPhase(ph) {
@@ -1622,7 +1572,8 @@ function awardStarPoint() {
 /* ---------- teacher: the tools panel ---------- */
 let toolsTab = 'timer';
 function openTools(tab) { if (tab) toolsTab = tab; $('#tools-overlay').hidden = false; renderTools(); }
-function closeTools() { $('#tools-overlay').hidden = true; }
+function closeTools() { $('#tools-overlay').hidden = true; hideToolFromClass(); }
+function hideToolFromClass() { if (H && H.toolShowing) { H.toolShowing = false; broadcast({ t: 'toolclose' }); } }
 function renderTools() {
   if ($('#tools-overlay').hidden) return;
   document.querySelectorAll('#tools-tabs .tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tool === toolsTab)));
@@ -1664,14 +1615,14 @@ function toolDice(body) {
   }
   const vis = el('div', { class: 'spin-visual', id: 'dice-host' });
   body.append(el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-sun', onclick: () => rollDice(vis) }, '🎲 Roll'),
-    el('button', { class: 'btn btn-ghost', onclick: () => broadcast({ t: 'toolclose' }) }, 'Hide from class')), vis);
+    el('button', { class: 'btn btn-ghost', onclick: () => { H.toolShowing = true; hideToolFromClass(); toast('Hidden from student screens.'); } }, 'Hide from class')), vis);
 }
 function rollDice(vis) {
   const d = H.dice, faces = d.custom ? diceFacesFromText(d.text) : null;
   if (d.custom && faces.length < 2) { toast('Add at least 2 faces, one per line.'); return; }
   const n = faces ? faces.length : 6, vals = Array.from({ length: d.n }, () => rand(n));
   const msg = { t: 'dice', faces, vals, dur: reduceMotion() ? 200 : 1300 };
-  broadcast(msg); showDice(vis, msg);
+  broadcast(msg); H.toolShowing = true; showDice(vis, msg);
 }
 function diceLabel(faces, v) { return faces ? faces[v] : DIE_FACES[v]; }
 function showDice(vis, m, resultEl) {
@@ -1726,7 +1677,7 @@ function toolWheel(body) {
   if (used.length) body.append(el('p', { class: 'muted' }, 'Already picked: ' + used.join(', ') + ' ', el('button', { class: 'btn btn-small', onclick: () => { H.wheel.used[pick.value] = []; renderTools(); } }, 'Reset')));
   const vis = el('div', { class: 'spin-visual' }), res = el('div', { class: 'spin-result', 'aria-live': 'assertive' });
   body.append(el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-sun', onclick: () => spinWheel(vis, res) }, '🎡 Spin'),
-    el('button', { class: 'btn btn-ghost', onclick: () => broadcast({ t: 'toolclose' }) }, 'Hide from class')), vis, res);
+    el('button', { class: 'btn btn-ghost', onclick: () => { H.toolShowing = true; hideToolFromClass(); toast('Hidden from student screens.'); } }, 'Hide from class')), vis, res);
 }
 function wheelItems(listId) {
   if (listId === '__class') return [...H.students.values()].filter(s => s.online).map(s => s.name).sort(naturalSort);
@@ -1740,7 +1691,7 @@ function spinWheel(vis, res) {
   items = shuffle(items);
   const wi = rand(items.length), win = items[wi], dur = reduceMotion() ? 300 : 3800;
   const title = id === '__class' ? 'Random pick' : (Wheels.all().find(x => x.id === id) || {}).name || 'Random wheel';
-  broadcast({ t: 'wheel', names: items, wi, win, dur, title });
+  broadcast({ t: 'wheel', names: items, wi, win, dur, title }); H.toolShowing = true;
   res.textContent = '';
   animateSpin(vis, items, wi, win, dur, () => { res.textContent = win; if (H.wheel.remove) { used.push(win); renderTools(); } });
 }
@@ -2298,6 +2249,174 @@ function editZones(it) {
 }
 
 /* =====================================================================
+   18. MANIPULATIVES: drag and drop, with "tap a card, then tap where it goes"
+   Works with mouse, touch and keyboard (Tab to a card, Enter, Tab to a spot, Enter).
+   ===================================================================== */
+function dragKit(root, onDrop) {
+  root.addEventListener('pointerdown', e => {
+    const card = e.target.closest('[data-drag]');
+    if (!card || !root.contains(card) || card.disabled || (e.button && e.button !== 0)) return;
+    const id = e.pointerId, sx = e.clientX, sy = e.clientY;
+    let ghost = null, over = null;
+    const move = ev => {
+      if (ev.pointerId !== id) return;
+      if (!ghost) {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 8) return;
+        const r = card.getBoundingClientRect();
+        ghost = card.cloneNode(true); ghost.classList.add('drag-ghost'); ghost.style.width = r.width + 'px';
+        document.body.append(ghost); card.classList.add('dragging'); root.classList.add('is-dragging');
+      }
+      ev.preventDefault();
+      ghost.style.left = (ev.clientX - ghost.offsetWidth / 2) + 'px'; ghost.style.top = (ev.clientY - ghost.offsetHeight / 2) + 'px';
+      const t = document.elementFromPoint(ev.clientX, ev.clientY), d = t && t.closest('[data-drop]');
+      const tgt = d && root.contains(d) ? d : null;
+      if (tgt !== over) { if (over) over.classList.remove('drop-hover'); over = tgt; if (over) over.classList.add('drop-hover'); }
+    };
+    const up = ev => {
+      if (ev.pointerId !== id) return;
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
+      if (!ghost) return;
+      ghost.remove(); card.classList.remove('dragging'); root.classList.remove('is-dragging');
+      if (over) over.classList.remove('drop-hover');
+      card._dragged = true; setTimeout(() => { card._dragged = false; }, 60);
+      if (over && ev.type === 'pointerup') onDrop(card, over, ev);
+    };
+    window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+  });
+}
+function cardBtn(label, key, selected, locked, onTap, extraClass) {
+  return el('button', { class: 'card' + (selected ? ' selected' : '') + (extraClass ? ' ' + extraClass : ''), type: 'button', 'data-drag': key, disabled: locked,
+    'aria-pressed': String(!!selected), onclick: e => { e.stopPropagation(); if (e.currentTarget._dragged) return; onTap(); } }, label);
+}
+function tip(locked, text) { return locked ? null : el('p', { class: 'manip-tip' }, text); }
+
+/* ---- Sort: cards into group boxes ---- */
+function sortUI(q, mine, locked) {
+  const place = q.items.map(it => (mine && q.groups.includes(mine[it])) ? mine[it] : null);
+  let sel = null;
+  const wrap = el('div', { class: 'manip' });
+  const draw = () => {
+    wrap.replaceChildren();
+    // tapping a card that sits somewhere else while one is chosen = put the chosen card there
+    const card = i => cardBtn(q.items[i], String(i), sel === i, locked, () => {
+      if (sel !== null && sel !== i && place[sel] !== place[i]) { place[sel] = place[i]; sel = null; } else sel = sel === i ? null : i;
+      draw();
+    });
+    const tray = el('div', { class: 'tray' + (sel !== null && place[sel] ? ' ready' : ''), 'data-drop': 'tray', 'aria-label': 'Cards to sort' });
+    tray.addEventListener('click', () => { if (sel !== null) { place[sel] = null; sel = null; draw(); } });
+    const left = q.items.map((_, i) => i).filter(i => !place[i]);
+    left.forEach(i => tray.append(card(i)));
+    if (!left.length) tray.append(el('span', { class: 'muted' }, locked ? '' : 'All sorted! ✓'));
+    const bins = el('div', { class: 'bins' });
+    q.groups.forEach(g => {
+      const bin = el('div', { class: 'bin' + (sel !== null ? ' ready' : ''), 'data-drop': 'g:' + g },
+        el('button', { class: 'bin-title', type: 'button', disabled: locked, onclick: e => { e.stopPropagation(); if (sel !== null) { place[sel] = g; sel = null; draw(); } } }, g));
+      bin.addEventListener('click', () => { if (sel !== null) { place[sel] = g; sel = null; draw(); } });
+      q.items.forEach((_, i) => { if (place[i] === g) bin.append(card(i)); });
+      bins.append(bin);
+    });
+    wrap.append(tip(locked, sel !== null ? 'Now tap the group where “' + q.items[sel] + '” belongs.' : 'Drag each card into a group — or tap a card, then tap a group.'), tray, bins);
+  };
+  if (!locked) dragKit(wrap, (c, t) => { const i = +c.dataset.drag; place[i] = t.dataset.drop === 'tray' ? null : t.dataset.drop.slice(2); sel = null; draw(); });
+  draw();
+  return { node: wrap, get: () => { const o = {}; q.items.forEach((it, i) => { o[it] = place[i]; }); return o; }, done: () => place.every(Boolean) };
+}
+
+/* ---- Match: drag answer cards next to each left side ---- */
+function matchUI(q, mine, locked) {
+  const rights = q.rights, slot = q.lefts.map(() => null), used = new Set();
+  if (mine) q.lefts.forEach((l, i) => { const k = rights.findIndex((r, j) => r === mine[l] && !used.has(j)); if (k >= 0) { slot[i] = k; used.add(k); } });
+  let sel = null;
+  const wrap = el('div', { class: 'manip' });
+  const put = (card, i) => { const from = slot.indexOf(card); const prev = slot[i]; if (from >= 0) slot[from] = prev; slot[i] = card; };
+  const draw = () => {
+    wrap.replaceChildren();
+    const card = k => cardBtn(rights[k], String(k), sel === k, locked, () => {
+      const at = x => slot.indexOf(x);
+      if (sel !== null && sel !== k && at(sel) !== at(k)) { if (at(k) >= 0) put(sel, at(k)); else slot[at(sel)] = null; sel = null; } else sel = sel === k ? null : k;
+      draw();
+    });
+    const tray = el('div', { class: 'tray', 'data-drop': 'tray', 'aria-label': 'Answer cards' });
+    tray.addEventListener('click', () => { if (sel !== null) { const f = slot.indexOf(sel); if (f >= 0) slot[f] = null; sel = null; draw(); } });
+    const free = rights.map((_, k) => k).filter(k => !slot.includes(k));
+    free.forEach(k => tray.append(card(k)));
+    if (!free.length) tray.append(el('span', { class: 'muted' }, locked ? '' : 'All matched! ✓'));
+    const rows = el('div', { class: 'match-rows' });
+    q.lefts.forEach((l, i) => {
+      const drop = el('div', { class: 'slot' + (sel !== null ? ' ready' : ''), 'data-drop': 's:' + i, role: 'button', tabindex: locked ? null : '0', 'aria-label': 'Match for ' + l });
+      const tapSlot = () => { if (locked) return; if (sel !== null) { put(sel, i); sel = null; } else if (slot[i] !== null) slot[i] = null; draw(); };
+      drop.addEventListener('click', tapSlot); drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tapSlot(); } });
+      if (slot[i] !== null) drop.append(card(slot[i])); else drop.append(el('span', { class: 'slot-hint' }, locked ? '—' : 'drop here'));
+      rows.append(el('div', { class: 'match-row' }, el('span', { class: 'left' }, l), el('span', { class: 'arrow', 'aria-hidden': 'true' }, '→'), drop));
+    });
+    wrap.append(tip(locked, sel !== null ? 'Now tap the spot where “' + rights[sel] + '” goes.' : 'Drag each answer next to its match — or tap an answer, then tap a spot.'), rows, tray);
+  };
+  if (!locked) dragKit(wrap, (c, t) => { const k = +c.dataset.drag; if (t.dataset.drop === 'tray') { const f = slot.indexOf(k); if (f >= 0) slot[f] = null; } else put(k, +t.dataset.drop.slice(2)); sel = null; draw(); });
+  draw();
+  return { node: wrap, get: () => { const o = {}; q.lefts.forEach((l, i) => { o[l] = slot[i] !== null ? rights[slot[i]] : ''; }); return o; }, done: () => slot.every(s => s !== null) };
+}
+
+/* ---- Put in order: drag cards up and down (arrow buttons too) ---- */
+function orderUI(q, mine, locked) {
+  let order = Array.isArray(mine) && mine.length === q.items.length && mine.every(m => q.items.includes(m)) ? mine.slice() : q.items.slice();
+  let sel = null;
+  const wrap = el('div', { class: 'manip' });
+  const moveTo = (from, to) => { const [x] = order.splice(from, 1); order.splice(to, 0, x); };
+  const draw = (focusKey) => {
+    wrap.replaceChildren();
+    const list = el('ol', { class: 'order-list' });
+    order.forEach((it, i) => {
+      const li = el('li', { 'data-drop': 'o:' + i, class: sel !== null && sel !== i ? 'ready' : '' },
+        el('span', { class: 'num', 'aria-hidden': 'true' }, String(i + 1)),
+        cardBtn(it, String(i), sel === i, locked, () => { if (sel === null) sel = i; else { if (sel !== i) moveTo(sel, i); sel = null; } draw(); }, 'grow'),
+        el('button', { class: 'btn', type: 'button', 'aria-label': 'Move ' + it + ' up', disabled: locked || i === 0, onclick: () => { moveTo(i, i - 1); sel = null; draw('u' + (i - 1)); } }, '▲'),
+        el('button', { class: 'btn', type: 'button', 'aria-label': 'Move ' + it + ' down', disabled: locked || i === order.length - 1, onclick: () => { moveTo(i, i + 1); sel = null; draw('d' + (i + 1)); } }, '▼'));
+      li.addEventListener('click', () => { if (sel !== null && sel !== i) { moveTo(sel, i); sel = null; draw(); } });
+      list.append(li);
+    });
+    wrap.append(tip(locked, sel !== null ? 'Now tap the spot where “' + order[sel] + '” should go.' : 'Drag the cards into order — or tap a card, then tap its new spot. ▲ ▼ work too.'), list);
+    if (focusKey) { const i = +focusKey.slice(1), li = list.children[i]; const b = li && li.querySelectorAll('button')[focusKey[0] === 'u' ? 1 : 2]; if (b && !b.disabled) b.focus(); else if (li) li.querySelector('button:not(:disabled)')?.focus(); }
+  };
+  if (!locked) dragKit(wrap, (c, t, ev) => {
+    const from = +c.dataset.drag; let to = +t.dataset.drop.slice(2);
+    const r = t.getBoundingClientRect(); if (ev.clientY > r.top + r.height / 2 && to < from) to++; else if (ev.clientY < r.top + r.height / 2 && to > from) to--;
+    if (to !== from) moveTo(from, to); sel = null; draw();
+  });
+  draw();
+  return { node: wrap, get: () => order.slice(), done: () => true };
+}
+
+/* ---- Word bank: drag words into blanks (or tap a word, then a blank) ---- */
+function bankUI(q, mine, locked) {
+  const n = q.parts.length - 1, fill = new Array(n).fill(null);   // fill[i] = bank index
+  if (Array.isArray(mine)) mine.forEach((w, i) => { const k = q.bank.findIndex((b, j) => b === w && !fill.includes(j)); if (k >= 0 && i < n) fill[i] = k; });
+  let sel = null;
+  const wrap = el('div', { class: 'manip' });
+  const put = (k, i) => { const from = fill.indexOf(k); const prev = fill[i]; if (from >= 0) fill[from] = prev; fill[i] = k; };
+  const draw = () => {
+    wrap.replaceChildren();
+    const sentence = el('div', { class: 'wb-sentence' });
+    q.parts.forEach((p, i) => {
+      sentence.append(p);
+      if (i >= n) return;
+      const k = fill[i];
+      const blank = el('button', { class: 'blank' + (sel !== null ? ' ready' : '') + (k !== null ? ' filled' : ''), type: 'button', 'data-drop': 'b:' + i, disabled: locked,
+        'aria-label': k !== null ? 'Blank ' + (i + 1) + ': ' + q.bank[k] + '. Tap to take it out.' : 'Blank ' + (i + 1) + ', empty',
+        onclick: e => { if (e.currentTarget._dragged) return; if (sel !== null) { put(sel, i); sel = null; } else if (k !== null) fill[i] = null; draw(); } }, k !== null ? q.bank[k] : '\u00a0');
+      if (k !== null && !locked) blank.setAttribute('data-drag', String(k));
+      sentence.append(blank);
+    });
+    const bank = el('div', { class: 'tray bank', 'data-drop': 'tray', 'aria-label': 'Word bank' });
+    bank.addEventListener('click', () => { if (sel !== null) { const f = fill.indexOf(sel); if (f >= 0) fill[f] = null; sel = null; draw(); } });
+    q.bank.forEach((w, k) => { if (!fill.includes(k)) bank.append(cardBtn(w, String(k), sel === k, locked, () => { sel = sel === k ? null : k; draw(); })); });
+    wrap.append(tip(locked, sel !== null ? 'Now tap the blank where “' + q.bank[sel] + '” goes.' : 'Drag words into the blanks — or tap a word, then tap a blank.'), sentence, bank);
+  };
+  if (!locked) dragKit(wrap, (c, t) => { const k = +c.dataset.drag; if (t.dataset.drop === 'tray') { const f = fill.indexOf(k); if (f >= 0) fill[f] = null; } else put(k, +t.dataset.drop.slice(2)); sel = null; draw(); });
+  draw();
+  return { node: wrap, get: () => fill.map(k => k !== null ? q.bank[k] : null), done: () => fill.every(k => k !== null) };
+}
+
+/* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
    ===================================================================== */
 function openTeacher() {
@@ -2785,7 +2904,6 @@ function init() {
   $('#h-score').addEventListener('click', () => openTools('score'));
   $('#tools-close').addEventListener('click', closeTools);
   document.querySelectorAll('#tools-tabs .tab').forEach(b => b.addEventListener('click', () => { toolsTab = b.dataset.tool; renderTools(); }));
-  $('#tool-hide').addEventListener('click', () => { $('#tool-overlay').hidden = true; });
   $('#bld-add-draw').addEventListener('click', addDrawModal);
   $('#bld-add-dots').addEventListener('click', () => addDotsModal(null));
   $('#h-spin-open').addEventListener('click', openSpinner);
