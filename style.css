@@ -175,6 +175,57 @@ label { font-weight: 600; display: block; margin: .7em 0 .25em; }
 .blank.ready { background: #FFF4D6; }
 @media (max-width: 560px) { .match-row { grid-template-columns: 1fr; gap: 2px; } .match-row .arrow { display: none; } }
 
+.spot-ans.is-right, .spot-legend .is-right { color: #12783F; font-weight: 700; }
+.spot-ans.is-wrong, .spot-legend .is-wrong { color: #B4234F; font-weight: 700; }
+.spot-legend { margin: 0 0 4px; font-size: .85rem; }
+
+/* word builder */
+#wb-word { flex: 1; min-width: 14em; width: auto; font-size: 1.2rem; }
+.wb-opts { gap: 4px 18px; }
+.wb-preview { display: block; min-height: 1.4em; margin: 6px 0; font-weight: 700; color: var(--ink-soft); }
+.wb-actions, .wb-opts { margin-top: 10px; }
+.wb-summary { font-weight: 700; margin: 10px 0 4px; }
+.wb-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; width: 100%; max-width: 1000px; }
+.wb-card { font: inherit; text-align: left; background: #fff; border: 3px solid var(--line); border-radius: var(--radius-sm); padding: 6px 8px; cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 4px; align-items: center; color: var(--ink); }
+.wb-card.is-right { border-color: #12783F; }
+.wb-card.is-wrong { border-color: #B4234F; }
+.wb-card .sname { font-weight: 700; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-card .wb-mark { font-weight: 800; }
+.wb-card.is-right .wb-mark { color: #12783F; }
+.wb-card.is-wrong .wb-mark { color: #B4234F; }
+.wb-card .wb-mini { grid-column: 1 / -1; }
+.wb-mini { display: flex; gap: 3px; }
+.wb-mini-box { min-width: 2em; padding: .15em .3em; border: 2px solid var(--ink); border-radius: 5px; background: #fff; text-align: center; font-weight: 700; }
+.wb-mini.big .wb-mini-box { min-width: 2.4em; font-size: 1.5rem; padding: .2em .4em; }
+.wb-card-student { max-width: 60em; }
+.wb-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.wb-head .q-text { flex: 1; margin: 0; }
+.wb-boxes { display: flex; gap: 0; justify-content: center; margin: 14px 0; }
+.wb-box { font: inherit; width: clamp(54px, 13vw, 104px); height: clamp(58px, 13vw, 100px); border: 3px solid var(--ink); margin-left: -3px; background: #E4EAF2; font-size: clamp(1.5rem, 5vw, 2.6rem); font-weight: 700; color: var(--ink); cursor: default; touch-action: none; }
+.wb-box:first-child { margin-left: 0; border-radius: 10px 0 0 10px; }
+.wb-box:last-child { border-radius: 0 10px 10px 0; }
+.wb-box.filled { background: #fff; cursor: grab; }
+.wb-box.drop-hover { background: #FFF4D6 !important; }
+.wb-answer { display: flex; gap: 10px; align-items: center; justify-content: center; margin: 8px 0; }
+.wb-tiles { display: grid; gap: 8px; }
+.wb-group { display: grid; grid-template-columns: 9.5em 1fr; gap: 8px; align-items: center; }
+.wb-glabel { font-size: .8rem; font-weight: 800; color: var(--ink-soft); }
+.wb-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.wb-tile { font: inherit; font-size: clamp(1.25rem, 3vw, 1.7rem); font-weight: 700; min-width: 2.6em; min-height: 2.2em; padding: 0 .35em; border-radius: 12px; border: 2px solid rgba(30,43,74,.35); box-shadow: 0 3px 0 rgba(30,43,74,.25); color: var(--ink); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.wb-tile:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(30,43,74,.25); }
+.wb-tile:disabled { opacity: .55; cursor: default; }
+.g-letters .wb-tile { background: #E3EEFA; }
+.g-letters .wb-tile.vowel { background: #FFE39A; }
+.g-dig .wb-tile { background: #DCD2F7; }
+.g-other .wb-tile { background: #E2E5EA; }
+.g-r .wb-tile { background: #C9EDD6; }
+.g-team .wb-tile { background: #FFD9BA; }
+.g-diph .wb-tile { background: #F2D2D2; }
+.g-mine .wb-tile { background: #fff; border-style: dashed; }
+.wb-tabs { margin-bottom: 4px; }
+@media (max-width: 600px) { .wb-group { grid-template-columns: 1fr; } }
+body.safe .wb-gallery .sname { filter: blur(6px); }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }
