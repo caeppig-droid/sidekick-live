@@ -25,7 +25,7 @@ const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.mi
 const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 const KEYS = {
   sets: NS + 'sets', report: NS + 'report', pinLock: NS + 'pinlock', prefs: NS + 'prefs',
-  settings: NS + 'settings', wheels: NS + 'wheels', wbTiles: NS + 'wbtiles', host: NS + 'hostsession', student: NS + 'student', teacherOk: NS + 'teacherok'
+  settings: NS + 'settings', wheels: NS + 'wheels', wbTiles: NS + 'wbtiles', games: NS + 'games', host: NS + 'hostsession', student: NS + 'student', teacherOk: NS + 'teacherok'
 };
 const IDB_NAME = NS + 'db';
 const QS = new URLSearchParams(location.search);
@@ -456,7 +456,7 @@ const S = {
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
   lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
-  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null
 };
 
 function studentJoin(room, first, initial, token) {
@@ -563,6 +563,7 @@ function onHostMsg(m) {
     case 'spot': S.spot = m.items || null; renderStudent(); break;
     case 'pt': showPointer($('#st-stage'), m.x, m.y); break;
     case 'ink': onInkMsg(m); break;
+    case 'game': onGameMsg(m); break;
     case 'dm': onDotShare(m); break;
     case 'lz': if (S.view && S.view.k === 'slide' && S.reviewIdx == null) showLaser($('#st-stage'), m); break;
     case 'tm': onTimer(m); break;
@@ -618,7 +619,7 @@ function renderStudent() {
     } else stage.append(msgCard('⏳', 'Joining your class…', 'Hang on a moment.'));
     return;
   }
-  if (v.k === 'end') { stage.append(msgCard('👋', 'Class is over!', 'Great work today. You can close this page.')); S.leaving = true; ssDel(KEYS.student); try { S.peer && S.peer.destroy(); } catch { /* ignore */ } setConn('ok', 'Finished'); return; }
+  if (v.k === 'end') { onGameMsg({ off: 1 }); stage.append(msgCard('👋', 'Class is over!', 'Great work today. You can close this page.')); S.leaving = true; ssDel(KEYS.student); try { S.peer && S.peer.destroy(); } catch { /* ignore */ } setConn('ok', 'Finished'); return; }
   if (v.paused) { stage.append(msgCard('👀', 'Eyes on your teacher', 'Your screen will come back soon.')); return; }
   if (v.look) { stage.append(msgCard('📺', 'Look at LL', 'Your teacher is showing something in LiveLesson right now.')); return; }
 
@@ -923,6 +924,7 @@ async function startHost(lesson, snap) {
   hostConnectPeer(0);
   H.ticker = makeTicker(250, hostTick);
   const it = currentItem(); if (it && it.kind === 'q') { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
+  H.game = null; $('#game-host-body').replaceChildren(); showGameHost(false); updateGameBar();
   setSignup(H.signup, true); updateHostScore(); updateHostTimer();
   renderHostStage(); renderHostSide(); saveReport(); saveHostSnap();
 }
@@ -1060,6 +1062,7 @@ function hostHello(conn, m) {
   send(st, liveMsg());
   if (H.spotlight) send(st, { t: 'spot', items: H.spotlight });
   if (H.timer.total) send(st, timerMsg());
+  send(st, gameMsgFor(st));
   if (H.sb.show) send(st, sbMsg());
   H.rosterDirty = true; H.liveDirty = true; H.deckDirty = true; H.reportDirty = true;
   renderSpinPool(); saveHostSnap();
@@ -1289,6 +1292,7 @@ async function endSession() {
   setTimeout(() => { try { peer && peer.destroy(); } catch { /* ignore */ } }, 1500);
   $('#spin-overlay').hidden = true; $('#spot-overlay').hidden = true; $('#tools-overlay').hidden = true;
   $('#h-timer').hidden = true; $('#h-score').hidden = true;
+  $('#game-host-body').replaceChildren(); showGameHost(false); $('#h-game').hidden = true;
   H = null;
   enterDash('report');
 }
@@ -2658,6 +2662,121 @@ function buildWordBoard(v) {
 }
 
 /* =====================================================================
+   20. GAME TIME: launch a Sidekick-edition game (up to 8 players)
+   The teacher hosts the game in a window inside Sidekick; the game sends its room code
+   up to Sidekick, which brings the chosen students in automatically.
+   ===================================================================== */
+const GAME_MAX = 8;
+const Games = {
+  all() { const v = lsGet(KEYS.games, []); return Array.isArray(v) ? v.filter(g => g && g.url && g.name) : []; },
+  save(v) { lsSet(KEYS.games, v); }
+};
+function gameUrlOk(u) { try { const x = new URL(u, location.href); return x.protocol === 'https:' || x.hostname === 'localhost' || x.hostname === '127.0.0.1'; } catch { return false; } }
+function gameLink(url, params) { const x = new URL(url, location.href); for (const [k, v] of Object.entries(params)) x.searchParams.set(k, v); return x.href; }
+
+/* ---------- teacher ---------- */
+function openGameLauncher() {
+  if (H.game) { showGameHost(true); return; }
+  const online = onlineStudents().sort((a, b) => naturalSort(a.name, b.name));
+  openModal((card, close) => {
+    const games = Games.all();
+    const pickGame = el('select', { 'aria-label': 'Game' }, games.map((g, i) => el('option', { value: String(i) }, g.name)));
+    const addName = el('input', { maxlength: 40, placeholder: 'Escape the Island' }), addUrl = el('input', { maxlength: 300, placeholder: 'https://YOUR-NAME.github.io/escape-the-island-sidekick/' });
+    const list = el('div', { class: 'spot-list game-players' }), count = el('p', { class: 'muted' });
+    const boxes = online.map(st => { const cb = el('input', { type: 'checkbox', value: st.id }); cb.checked = online.length <= GAME_MAX; return el('label', { class: 'check' }, cb, el('span', { class: 'sname', text: st.name })); });
+    const sync = () => {
+      const n = boxes.filter(b => b.firstChild.checked).length;
+      boxes.forEach(b => { b.firstChild.disabled = !b.firstChild.checked && n >= GAME_MAX; });
+      count.textContent = n + ' of ' + GAME_MAX + ' players chosen' + (online.length > GAME_MAX ? '. Everyone else stays on the lesson.' : '.');
+    };
+    boxes.forEach(b => b.firstChild.addEventListener('change', sync));
+    list.append(...boxes); if (!online.length) list.append(el('p', { class: 'muted' }, 'No students are connected yet.'));
+    sync();
+    card.append(el('h2', null, '🎮 Game time'),
+      games.length ? el('div', null, el('label', null, 'Game'), pickGame)
+        : el('div', null, el('p', null, 'Add your game first. Use the Sidekick edition’s web address.'), el('label', null, 'Game name'), addName, el('label', null, 'Web address'), addUrl),
+      el('label', null, online.length > GAME_MAX ? 'Pick up to 8 players' : 'Players'), list, count,
+      el('p', { class: 'muted' }, 'The game opens on your screen. Enter your game PIN to host, and the players join on their own.'),
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          let g = games[+pickGame.value];
+          if (!games.length) {
+            const name = cleanText(addName.value, 40).trim(), url = addUrl.value.trim();
+            if (!name || !gameUrlOk(url)) { toast('Add a game name and its https web address.'); return; }
+            g = { name, url }; Games.save([g]);
+          }
+          const players = boxes.filter(b => b.firstChild.checked).map(b => b.firstChild.value);
+          if (!players.length) { toast('Pick at least one player.'); return; }
+          close(); startGame(g, players);
+        } }, 'Open the game'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
+  });
+}
+function startGame(g, players) {
+  H.game = { name: g.name, url: new URL(g.url, location.href).href, players: new Set(players), code: null };
+  const frame = el('iframe', { id: 'game-host-frame', title: g.name, src: gameLink(H.game.url, { sk: 'host', name: 'Teacher' }), allow: 'clipboard-write; autoplay' });
+  $('#game-host-body').replaceChildren(frame);
+  updateGameBar(); showGameHost(true);
+}
+function gameMsgFor(st) { const g = H.game; return g && g.code && g.players.has(st.id) ? { t: 'game', url: g.url, code: g.code, name: g.name } : { t: 'game', off: 1 }; }
+function onGameMessage(e) {
+  if (!H || !H.game) return;
+  const f = $('#game-host-frame'); if (!f || e.source !== f.contentWindow) return;
+  const d = e.data || {};
+  if (d.event === 'room' && typeof d.code === 'string' && /^[A-Z0-9]{4}$/.test(d.code)) {
+    H.game.code = d.code;
+    for (const st of H.students.values()) if (st.online && H.game.players.has(st.id)) send(st, gameMsgFor(st));
+    updateGameBar(); toast('Players are joining the game.');
+  }
+}
+function updateGameBar() {
+  const g = H && H.game, pill = $('#h-game');
+  if (!g) { pill.hidden = true; return; }
+  const names = [...g.players].map(id => (H.students.get(id) || {}).name).filter(Boolean);
+  $('#game-host-title').textContent = '🎮 ' + g.name + (g.code ? '  ·  room ' + g.code : '  ·  enter your game PIN to host');
+  $('#game-host-players').textContent = names.length + ' player' + (names.length === 1 ? '' : 's') + ': ' + names.join(', ');
+  pill.hidden = false; pill.textContent = '🎮 Game running: open';
+}
+function showGameHost(on) { $('#game-host').hidden = !on; }
+async function endGame() {
+  if (!H || !H.game) return;
+  if (!(await confirmBox('End the game for everyone?', 'Players go back to the lesson. Download the game’s class report first if you need it.', 'End game'))) return;
+  broadcast({ t: 'game', off: 1 });
+  H.game = null; $('#game-host-body').replaceChildren(); showGameHost(false); updateGameBar();
+  toast('Game over. Everyone is back on the lesson.');
+}
+
+/* ---------- student ---------- */
+function onGameMsg(m) {
+  const box = $('#st-game');
+  if (m.off) { S.game = null; box.replaceChildren(); box.hidden = true; document.body.classList.remove('in-game'); return; }
+  if (!m.url || !/^[A-Z0-9]{4}$/.test(m.code || '')) return;
+  if (S.game && S.game.code === m.code && box.querySelector('iframe')) return;   // already in this game
+  S.game = { code: m.code, url: m.url };
+  box.replaceChildren(el('iframe', { title: cleanText(m.name || 'Game', 40), src: gameLink(m.url, { sk: 'join', room: m.code, name: S.name || (S.first + ' ' + S.initial + '.') }), allow: 'autoplay' }));
+  box.hidden = false; document.body.classList.add('in-game');
+}
+
+/* ---------- Settings: the games list ---------- */
+function gamesSettings() {
+  const wrap = el('div', { class: 'q-card' }, el('h3', null, '🎮 Games for Game time'),
+    el('p', { class: 'muted' }, 'Add the web address of each Sidekick edition game (for example your escape-the-island-sidekick page). Up to 8 students play while the rest stay on the lesson.'));
+  const draw = () => {
+    wrap.querySelectorAll('.game-row, .game-add').forEach(x => x.remove());
+    Games.all().forEach((g, i) => wrap.append(el('div', { class: 'game-row row-inline' }, el('strong', null, g.name), el('span', { class: 'muted' }, g.url),
+      el('button', { class: 'btn btn-small btn-danger', onclick: () => { const a = Games.all(); a.splice(i, 1); Games.save(a); draw(); } }, 'Remove'))));
+    const n = el('input', { maxlength: 40, placeholder: 'Game name' }), u = el('input', { maxlength: 300, placeholder: 'https://YOUR-NAME.github.io/escape-the-island-sidekick/' });
+    wrap.append(el('div', { class: 'game-add row-inline' }, n, u, el('button', { class: 'btn', onclick: () => {
+      const name = cleanText(n.value, 40).trim(), url = u.value.trim();
+      if (!name || !gameUrlOk(url)) { toast('Add a game name and its https web address.'); return; }
+      const a = Games.all(); a.push({ name, url }); Games.save(a); draw(); toast('Game added.');
+    } }, 'Add game')));
+  };
+  draw();
+  return wrap;
+}
+
+/* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
    ===================================================================== */
 function openTeacher() {
@@ -2916,7 +3035,7 @@ function renderSettings() {
     el('label', { for: 'set-rate' }, 'Slide sending speed'), rate,
     el('p', { class: 'muted' }, 'How fast slides travel from your computer to students before and during class. “Normal” uses about 3 Mbps of your upload and leaves room for Class video.'),
     el('label', { for: 'set-mode' }, 'Share spinner default'), mode,
-    el('p', { class: 'muted' }, 'The Teacher PIN is set in script.js. Lessons, question sets and reports are saved only in this browser on this device.')));
+    el('p', { class: 'muted' }, 'The Teacher PIN is set in script.js. Lessons, question sets and reports are saved only in this browser on this device.')), gamesSettings());
 }
 
 /* =====================================================================
@@ -3074,7 +3193,7 @@ function init() {
   });
   document.addEventListener('keydown', e => {
     if (e.altKey && e.shiftKey && e.code === 'KeyT') { e.preventDefault(); openTeacher(); return; }
-    if (H && !$('#screen-host').hidden && $('#spin-overlay').hidden && $('#spot-overlay').hidden && $('#modal-overlay').hidden && $('#tools-overlay').hidden && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+    if (H && !$('#screen-host').hidden && $('#spin-overlay').hidden && $('#spot-overlay').hidden && $('#modal-overlay').hidden && $('#tools-overlay').hidden && $('#game-host').hidden && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
       if (['ArrowRight', 'PageDown'].includes(e.key)) { e.preventDefault(); hostGo(H.pos + 1); }
       if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); hostGo(H.pos - 1); }
     }
@@ -3142,6 +3261,11 @@ function init() {
   $('#h-signup').addEventListener('click', () => setSignup(!H.signup));
   $('#h-tools').addEventListener('click', () => openTools());
   $('#h-wb').addEventListener('click', () => wbStart());
+  $('#h-gametime').addEventListener('click', openGameLauncher);
+  $('#h-game').addEventListener('click', () => showGameHost(true));
+  $('#game-host-back').addEventListener('click', () => showGameHost(false));
+  $('#game-host-end').addEventListener('click', endGame);
+  window.addEventListener('message', onGameMessage);
   $('#h-timer').addEventListener('click', () => openTools('timer'));
   $('#h-score').addEventListener('click', () => openTools('score'));
   $('#tools-close').addEventListener('click', closeTools);

@@ -226,6 +226,20 @@ label { font-weight: 600; display: block; margin: .7em 0 .25em; }
 @media (max-width: 600px) { .wb-group { grid-template-columns: 1fr; } }
 body.safe .wb-gallery .sname { filter: blur(6px); }
 
+/* game time */
+.game-host { position: fixed; inset: 0; z-index: 90; background: var(--paper); display: flex; flex-direction: column; }
+.game-host-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 14px; background: var(--card); border-bottom: 2px solid var(--line); }
+.game-host-bar > div { flex: 1; min-width: 14em; }
+.game-host-body { flex: 1; min-height: 0; }
+.game-host-body iframe, .st-game iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+.st-game { flex: 1; min-height: 0; }
+body.in-game #st-stage, body.in-game #st-review, body.in-game .st-dock { display: none !important; }
+.game-pill { background: #D9F2E6; }
+.game-players { max-height: 40vh; }
+.game-row { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.game-add input { flex: 1; min-width: 12em; }
+body.safe .sname-list { filter: blur(6px); }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }

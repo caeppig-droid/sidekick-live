@@ -52,6 +52,7 @@
     <span id="st-score" class="score-pill" hidden></span>
     <span id="st-stars" class="stars" title="Class stars" aria-live="polite"></span>
   </header>
+  <section id="st-game" class="st-game" hidden></section>
   <section id="st-stage" class="st-stage" aria-live="polite"></section>
   <nav id="st-review" class="st-review" hidden>
     <button class="btn" id="st-prev">◀ Back</button>
@@ -124,6 +125,7 @@
     <span id="h-deck" class="count-pill"></span>
     <button id="h-timer" class="timer-pill" hidden title="Open the timer"></button>
     <button id="h-score" class="score-pill" hidden title="Open the scoreboard"></button>
+    <button id="h-game" class="score-pill game-pill" hidden></button>
     <label class="check small"><input type="checkbox" id="h-safe"> Projector-safe</label>
     <button class="btn btn-ghost" id="h-end">End session</button>
   </header>
@@ -147,6 +149,7 @@
         <button class="tool" id="h-signup" aria-pressed="false">✋ Open share sign-up</button>
         <button class="tool" id="h-tools">🧰 Timer, dice &amp; more</button>
         <button class="tool" id="h-wb" aria-pressed="false">🔤 Word builder</button>
+        <button class="tool" id="h-gametime">🎮 Game time</button>
         <button class="tool" id="h-spot-open">🔦 Spotlight</button>
         <button class="tool" id="h-pause" aria-pressed="false">⏸ Pause screens</button>
         <button class="tool" id="h-look" aria-pressed="false">👀 Look at LL</button>
@@ -208,6 +211,15 @@
       <button class="btn btn-ghost" id="spot-close">Close</button>
     </div>
   </div>
+</div>
+
+<div id="game-host" class="game-host" hidden>
+  <div class="game-host-bar">
+    <div><strong id="game-host-title"></strong><div id="game-host-players" class="muted sname-list"></div></div>
+    <button class="btn" id="game-host-back">◀ Back to Sidekick (game keeps going)</button>
+    <button class="btn btn-primary" id="game-host-end">End game for everyone</button>
+  </div>
+  <div id="game-host-body" class="game-host-body"></div>
 </div>
 
 <div id="tools-overlay" class="overlay" hidden>
