@@ -456,7 +456,7 @@ const S = {
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
   lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
-  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0, racePrev: null, raceTimerT: null
 };
 
 function studentJoin(room, first, initial, token) {
@@ -575,7 +575,7 @@ function onHostMsg(m) {
     case 'dice': case 'wheel': case 'toolclose': studentTool(m); break;
   }
 }
-function viewQid(v) { return v ? (v.k === 'boss' ? (v.q ? v.q.qid : null) : v.k === 'q' ? v.q.qid : (v.k === 'draw' || v.k === 'dots') ? v.qid : null) : null; }
+function viewQid(v) { return v ? ((v.k === 'boss' || v.k === 'race') ? (v.q ? v.q.qid : null) : v.k === 'q' ? v.q.qid : (v.k === 'draw' || v.k === 'dots') ? v.qid : null) : null; }
 function viewMedia(v) { return v ? (v.k === 'slide' ? v.sid : v.k === 'q' ? v.q.img : (v.k === 'draw' || v.k === 'dots') ? v.bg : null) : null; }
 function mediaBox(mid) {
   const u = mediaUrl(mid);
@@ -642,6 +642,7 @@ function renderStudent() {
       case 'dots': stage.append(buildDotMap(v)); break;
       case 'wb': stage.append(buildWordBoard(v)); break;
       case 'boss': stage.append(buildBossView(v)); break;
+      case 'race': stage.append(buildRaceView(v)); break;
       case 'text': {
         const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
         stage.append(card);
@@ -928,7 +929,7 @@ async function startHost(lesson, snap) {
   hostConnectPeer(0);
   H.ticker = makeTicker(250, hostTick);
   const it = currentItem(); if (it && it.kind === 'q') { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
-  H.boss = null;
+  H.boss = null; H.race = null;
   H.game = null; $('#game-host-body').replaceChildren(); showGameHost(false); updateGameBar();
   setSignup(H.signup, true); updateHostScore(); updateHostTimer();
   renderHostStage(); renderHostSide(); saveReport(); saveHostSnap();
@@ -1091,6 +1092,7 @@ function resultsFor(it) {
 function viewMsg(st, cache) {
   const base = { t: 'view', paused: H.paused, look: H.look, review: H.review, signup: H.signup, pos: H.pos, total: H.items.length };
   if (H.ended) return { t: 'view', k: 'end' };
+  if (H.race && H.race.active) return raceView(base, st);
   if (H.boss && H.boss.active) return bossView(base, st);
   if (H.wb && H.wb.active) return wbView(base, st);
   const it = currentItem();
@@ -1120,7 +1122,7 @@ function broadcastView() { const cache = {}; for (const st of H.students.values(
 function liveMsg() {
   const it = currentItem();
   let answered = null;
-  if ((H.wb && H.wb.active) || (H.boss && H.boss.active)) answered = null;
+  if ((H.wb && H.wb.active) || (H.boss && H.boss.active) || (H.race && H.race.active)) answered = null;
   else if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) answered = Object.keys(H.report.answers[it.id] || {}).filter(sid => !isDemoId(sid)).length;
   return { t: 'live', answered, online: onlineStudents().length, stars: H.stars, rx: H.rx };
 }
@@ -1134,6 +1136,7 @@ function ensureReportQuestion(it) {
   H.reportDirty = true;
 }
 function hostAnswer(st, m) {
+  if (H.race && H.race.active) { raceAnswer(st, m); return; }
   if (H.boss && H.boss.active) { bossAnswer(st, m); return; }
   const it = currentItem();
   if (!it || (it.kind !== 'q' && it.kind !== 'draw' && it.kind !== 'dots') || m.qid !== it.id || (H.phase[it.id] || 'open') !== 'open') return;
@@ -1176,6 +1179,7 @@ function hostTick() {
   if (H.timer.total) updateHostTimer();
   dotsTick(now);
   bossTick(now);
+  raceTick(now);
   if (H.wbDirty && now - H.lastWb > 500) { H.lastWb = now; if (H.wb && H.wb.active) renderWbGallery(); else H.wbDirty = false; }
   if (H.galleryDirty && now - H.lastGallery > 1000) { H.lastGallery = now; const it = currentItem(); if (it && it.kind === 'draw') renderGallery(it); else H.galleryDirty = false; }
   if (now - H.lastPing > 5000) {
@@ -1253,6 +1257,7 @@ function hostGo(pos) {
   if (!H || pos < 0 || pos >= H.items.length) return;
   if (H.wb && H.wb.active) { toast('End the word builder to go back to the lesson.'); return; }
   if (H.boss && H.boss.active) { toast('End the boss battle to go back to the lesson.'); return; }
+  if (H.race && H.race.active) { toast('End the race to go back to the lesson.'); return; }
   H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null;
   const it = currentItem();
   if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
@@ -1336,6 +1341,11 @@ function renderHostStage() {
   const stage = $('#h-stage'); stage.replaceChildren();
   $('#h-wb').setAttribute('aria-pressed', String(!!(H.wb && H.wb.active)));
   $('#h-boss').setAttribute('aria-pressed', String(!!(H.boss && H.boss.active)));
+  $('#h-race').setAttribute('aria-pressed', String(!!(H.race && H.race.active)));
+  if (H.race && H.race.active) {
+    renderRaceStage(stage); $('#h-prev').disabled = true; $('#h-next').disabled = true;
+    $('#h-pos').textContent = 'Team Race'; $('#h-notes').textContent = ''; $('#h-next-preview').textContent = 'Back to the lesson when you end the race.'; return;
+  }
   if (H.boss && H.boss.active) {
     renderBossStage(stage); $('#h-prev').disabled = true; $('#h-next').disabled = true;
     $('#h-pos').textContent = 'Boss Battle'; $('#h-notes').textContent = ''; $('#h-next-preview').textContent = 'Back to the lesson when you end the boss battle.'; return;
@@ -1385,7 +1395,7 @@ function renderHostLive(msg) {
   if (!H) return;
   const it = currentItem(), online = msg.online;
   let line = '⭐ ' + H.stars + ' class stars';
-  if (!(H.wb && H.wb.active) && !(H.boss && H.boss.active) && it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) {
+  if (!(H.wb && H.wb.active) && !(H.boss && H.boss.active) && !(H.race && H.race.active) && it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) {
     line = 'Answered ' + msg.answered + ' of ' + online + '  ·  ' + line;
     const a = $('#h-answered'); if (a) a.textContent = msg.answered + ' of ' + online + ' answered';
   }
@@ -2497,7 +2507,7 @@ function wbIsCorrect(b, target) { return !!target && b.length === target.length 
 
 /* ---------- teacher ---------- */
 function wbStart() {
-  if (H.boss && H.boss.active) { toast('End the boss battle first.'); return; }
+  if ((H.boss && H.boss.active) || (H.race && H.race.active)) { toast('End the game first.'); return; }
   if (H.wb && H.wb.active) { renderHostStage(); return; }
   const cfg = wbSettings();
   H.wb = { active: true, round: 0, cid: 0, n: 3, target: null, word: '', chain: cfg.chain !== false, hear: cfg.hear !== false, phase: 'build', showAns: false,
@@ -2863,7 +2873,7 @@ function confetti(box) {
 
 /* ---------- teacher ---------- */
 function bossSetup() {
-  if (H.wb && H.wb.active) { toast('End the word builder first.'); return; }
+  if ((H.wb && H.wb.active) || (H.race && H.race.active)) { toast('End the word builder or race first.'); return; }
   if (H.boss && H.boss.active) { renderHostStage(); return; }
   const sets = Sets.all().filter(s => s.questions.length);
   if (!sets.length) { toast('Import a question set first (Teacher Mode → Question sets).'); return; }
@@ -3110,6 +3120,265 @@ setInterval(() => {
     bar.hidden = false;
   } else if (!stuck && !bar.hidden) bar.hidden = true;
 }, 3000);
+
+/* =====================================================================
+   24. TEAM RACE (engine) + TREASURE DIVE (first theme)
+   Teams move by their PERCENT correct, so team size doesn't matter. No names during play.
+   A theme supplies only the scene, the stops/zones with facts, and the event wording.
+   ===================================================================== */
+const RACE_TEAMS = [
+  { name: 'Octopus', emoji: '🐙', color: '#D9468F' }, { name: 'Dolphin', emoji: '🐬', color: '#1F6FD1' },
+  { name: 'Turtle', emoji: '🐢', color: '#2E9E5B' }, { name: 'Whale', emoji: '🐳', color: '#5B5BD6' },
+  { name: 'Crab', emoji: '🦀', color: '#E0622B' }, { name: 'Puffer', emoji: '🐡', color: '#C99A06' }
+];
+const RACE_THEMES = {
+  dive: {
+    title: 'Treasure Dive', icon: '🤿', goalName: 'the shipwreck',
+    stops: [
+      { at: 0, name: 'Sunlight zone', fact: 'Sunlight zone: most ocean animals live up here, where sunlight reaches.' },
+      { at: 25, name: 'Twilight zone', fact: 'Twilight zone: only a little light gets this deep, and many animals here make their own glow.' },
+      { at: 55, name: 'Midnight zone', fact: 'Midnight zone: no sunlight at all! An anglerfish uses a glowing lure to find food.' },
+      { at: 100, name: 'The shipwreck', fact: 'The shipwreck! The treasure chest is waiting.' }
+    ],
+    where: pos => Math.round(Math.min(100, pos) / 100 * 3800).toLocaleString() + ' m deep',
+    events: {
+      boost: t => '🐬 A friendly dolphin towed Team ' + t + ' deeper!',
+      all: () => '🫧 A bubble burst pushed every team a little deeper!',
+      back: t => '🌊 A strong current pushed Team ' + t + ' back up a bit.'
+    },
+    win: t => '💰 Team ' + t + ' reached the shipwreck and opened the treasure chest!',
+    deepest: t => '💰 Time’s up! Team ' + t + ' dove the deepest and wins the treasure!'
+  }
+};
+function raceZoneFloor(theme, pos) { let f = 0; for (const s of RACE_THEMES[theme].stops) if (pos >= s.at && s.at < 100) f = s.at; return f; }
+
+/* ---------- scene: the ocean (drawn in code, original art) ---------- */
+function diveScene(teams, prev, myTeam) {
+  const W = 1000, Hh = 620, top = 70, bottom = 540, n = teams.length, lane = W / (n + 1);
+  const y = p => top + (bottom - top) * Math.min(100, Math.max(0, p)) / 100;
+  const zone = (y1, y2, c1, c2, id) => `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs><rect x="0" y="${y1}" width="${W}" height="${y2 - y1}" fill="url(#${id})"/>`;
+  let s = `<svg viewBox="0 0 ${W} ${Hh}" class="race-svg" role="img" aria-label="Teams diving toward a shipwreck">`;
+  s += `<rect x="0" y="0" width="${W}" height="${top}" fill="#CFEAF9"/>`;
+  s += zone(top, y(25), '#5BC0EB', '#2A86C9', 'z1') + zone(y(25), y(55), '#2A86C9', '#164E8A', 'z2') + zone(y(55), Hh, '#164E8A', '#0A1E3F', 'z3');
+  s += `<path d="M0 ${top} q25 -10 50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0" fill="none" stroke="#fff" stroke-width="4" opacity=".8"/>`;
+  [['Sunlight zone', 0], ['Twilight zone', 25], ['Midnight zone', 55]].forEach(([t, p]) => { s += `<text x="12" y="${y(p) + 26}" font-size="20" font-weight="700" fill="#fff" opacity=".85" font-family="Lexend, system-ui, sans-serif">${t}</text>`; });
+  // sunlight fish, twilight jellies, midnight anglerfish light
+  [[180, 130], [760, 170], [520, 110]].forEach(([fx, fy]) => { s += `<g opacity=".8"><ellipse cx="${fx}" cy="${fy}" rx="16" ry="8" fill="#FFC53D"/><path d="M${fx + 14} ${fy} l12 -8 v16z" fill="#FFC53D"/></g>`; });
+  [[300, 270], [880, 300], [620, 250]].forEach(([jx, jy]) => { s += `<g opacity=".75"><path d="M${jx - 14} ${jy} a14 12 0 0 1 28 0z" fill="#E7A6F2"/><path d="M${jx - 10} ${jy} q-3 14 0 22M${jx} ${jy} q3 14 0 22M${jx + 10} ${jy} q-3 14 0 22" stroke="#E7A6F2" stroke-width="2" fill="none"/></g>`; });
+  s += `<g opacity=".9"><circle cx="840" cy="430" r="7" fill="#FFF6A8"/><circle cx="840" cy="430" r="16" fill="#FFF6A8" opacity=".25"/><path d="M840 437 q-6 18 -24 22 q-40 4 -48 -14 q10 -24 46 -14z" fill="#33415C"/></g>`;
+  // the shipwreck + treasure at the bottom
+  s += `<path d="M0 ${Hh} L0 ${bottom + 40} q250 -30 500 -6 t500 10 L${W} ${Hh}z" fill="#C9A86A" opacity=".85"/>`;
+  s += `<g transform="translate(${W / 2 - 150} ${bottom - 22})"><path d="M0 40 L40 70 L250 70 L300 30 L270 36 L40 36z" fill="#6B4A2B" stroke="#3E2A17" stroke-width="3"/><rect x="120" y="-30" width="8" height="66" fill="#3E2A17" transform="rotate(-12 124 36)"/><path d="M128 -26 l52 18 -52 18z" fill="#E9E1D0" opacity=".7" transform="rotate(-12 124 36)"/>
+    <g transform="translate(170 46)"><rect x="0" y="0" width="44" height="26" rx="4" fill="#B5761E" stroke="#5E3A0B" stroke-width="3"/><path d="M0 0 q22 -18 44 0z" fill="#D18F2A" stroke="#5E3A0B" stroke-width="3"/><rect x="18" y="6" width="8" height="10" fill="#FFC53D"/></g></g>`;
+  s += `<text x="${W / 2}" y="${Hh - 10}" text-anchor="middle" font-size="18" font-weight="800" fill="#FFF4D6" font-family="Lexend, system-ui, sans-serif">⚓ Shipwreck · 3,800 m</text>`;
+  teams.forEach((t, k) => {
+    const x = lane * (k + 1), p0 = prev && prev[k] != null ? prev[k] : t.pos;
+    s += `<line x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" stroke="#fff" stroke-dasharray="4 8" opacity=".25"/>`;
+    const mine = myTeam === k;
+    s += `<g class="race-token" data-k="${k}" data-from="${y(p0)}" data-to="${y(t.pos)}" style="transform: translateY(${y(p0)}px)">
+      <g transform="translate(${x} 0)">${mine ? '<circle r="44" fill="none" stroke="#FFC53D" stroke-width="5" stroke-dasharray="6 5"/>' : ''}
+      <ellipse rx="36" ry="20" fill="${t.color}" stroke="#fff" stroke-width="3"/><rect x="-10" y="-34" width="20" height="18" rx="5" fill="${t.color}" stroke="#fff" stroke-width="3"/>
+      <circle cx="12" cy="0" r="9" fill="#BFE6FF" stroke="#fff" stroke-width="2"/><path d="M-36 0 l-12 -10 v20z" fill="${t.color}"/>
+      <text x="-10" y="7" text-anchor="middle" font-size="20">${t.emoji}</text></g></g>`;
+    s += `<text x="${x}" y="${top - 30}" text-anchor="middle" font-size="18" font-weight="800" fill="#1E2B4A" font-family="Lexend, system-ui, sans-serif">${t.emoji} ${t.name}</text>`;
+  });
+  return s + '</svg>';
+}
+function raceScene(v, prev) {
+  const box = el('div', { class: 'race-scene' + (v.phase === 'won' ? ' won' : '') });
+  box.innerHTML = diveScene(v.teams, prev, v.myTeam);
+  requestAnimationFrame(() => requestAnimationFrame(() => box.querySelectorAll('.race-token').forEach(g => { g.style.transform = 'translateY(' + g.dataset.to + 'px)'; })));
+  return box;
+}
+
+/* ---------- teacher ---------- */
+function raceSetup() {
+  if ((H.wb && H.wb.active) || (H.boss && H.boss.active)) { toast('End the word builder or boss battle first.'); return; }
+  if (H.race && H.race.active) { renderHostStage(); return; }
+  const sets = Sets.all().filter(s => s.questions.length);
+  if (!sets.length) { toast('Import a question set first (Teacher Mode → Question sets).'); return; }
+  const n = onlineStudents().length;
+  openModal((card, close) => {
+    const theme = el('select', { 'aria-label': 'Theme' }, el('option', { value: 'dive' }, '🤿 Treasure Dive'), el('option', { value: 'world', disabled: true }, '🌍 Race Around the World (coming next)'));
+    const set = el('select', { 'aria-label': 'Question set' }, sets.map(s => el('option', { value: s.id }, s.name + ' (' + s.questions.length + ')')));
+    const count = el('select', { 'aria-label': 'How many questions' }, [5, 8, 10, 12, 15, 20].map(k => el('option', { value: String(k) }, k + ' questions'))); count.value = '10';
+    const secs = el('select', { 'aria-label': 'Time per question' }, [[0, 'No timer'], [20, '20 seconds'], [30, '30 seconds'], [45, '45 seconds'], [60, '1 minute'], [90, '90 seconds']].map(([v, t]) => el('option', { value: String(v) }, t))); secs.value = '30';
+    const teams = el('select', { 'aria-label': 'Teams' }, [2, 3, 4, 5, 6].map(k => el('option', { value: String(k) }, k + ' teams'))); teams.value = String(Math.min(6, Math.max(2, Math.round(n / 8) || 2)));
+    const ev = el('select', { 'aria-label': 'Surprise events' }, [['off', 'Surprise events: Off'], ['some', 'Surprise events: Sometimes'], ['often', 'Surprise events: Often']].map(([v, t]) => el('option', { value: v }, t))); ev.value = 'some';
+    const shuf = el('input', { type: 'checkbox' }); shuf.checked = true;
+    card.append(el('h2', null, '🏁 Team Race'), el('label', null, 'Theme'), theme, el('label', null, 'Question set'), set,
+      el('div', { class: 'row-inline' }, count, secs, teams, ev),
+      el('label', { class: 'check small' }, shuf, 'Mix up the question order'),
+      el('p', { class: 'muted' }, n + ' student' + (n === 1 ? '' : 's') + ' connected. Teams are made fairly at random; anyone who joins late goes to the smallest team.'),
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-sun', onclick: () => { const s = sets.find(x => x.id === set.value); close(); raceStart({ theme: theme.value, set: s, n: +count.value, secs: +secs.value, teams: +teams.value, events: ev.value, shuffle: shuf.checked }); } }, 'Make the teams'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
+  });
+}
+function raceStart(o) {
+  const all = o.shuffle ? shuffle(o.set.questions) : o.set.questions.slice();
+  const qs = all.slice(0, Math.min(o.n, all.length)).map(q => JSON.parse(JSON.stringify(q)));
+  const picks = shuffle(RACE_TEAMS).slice(0, o.teams);
+  const teams = picks.map(t => ({ ...t, members: [], pos: 0, gain: 0 }));
+  shuffle(onlineStudents()).forEach((st, i) => teams[i % teams.length].members.push(st.id));
+  H.race = { active: true, opts: o, theme: o.theme, qs, i: -1, phase: 'teams', teams, step: 100 / (qs.length * 0.65), answers: {}, pub: null, endAt: null,
+    myCorrect: {}, round: (H.race ? H.race.round : 0) + 1, prev: null, msg: [], reached: new Set([0]), winner: null };
+  H.spotlight = null; broadcast({ t: 'spot', items: null });
+  broadcastView(); renderHostStage();
+}
+function raceTeamOf(sid) { return H.race.teams.findIndex(t => t.members.includes(sid)); }
+function raceEnsureTeam(st) {
+  if (st.demo || raceTeamOf(st.id) >= 0) return;
+  const t = H.race.teams.reduce((a, b) => (a.members.length <= b.members.length ? a : b));
+  t.members.push(st.id);
+}
+function raceQ() { const r = H.race; return r && r.i >= 0 ? r.qs[r.i] : null; }
+function raceQid() { return 'tr' + H.race.round + '-' + H.race.i; }
+function raceNext() {
+  const r = H.race;
+  if (r.i + 1 >= r.qs.length) { raceFinish(true); return; }
+  r.prev = r.teams.map(t => t.pos); r.i++; r.answers = {}; r.msg = []; r.phase = 'question';
+  r.pub = publicQ(raceQ(), raceQid());
+  r.endAt = r.opts.secs ? performance.now() + r.opts.secs * 1000 : null;
+  broadcastView(); renderHostStage();
+}
+function raceReveal() {
+  const r = H.race; if (r.phase !== 'question') return;
+  const th = RACE_THEMES[r.theme];
+  r.phase = 'reveal'; r.endAt = null; r.prev = r.teams.map(t => t.pos); r.msg = [];
+  r.teams.forEach(t => {
+    const present = t.members.filter(id => { const s = H.students.get(id); return (s && s.online) || r.answers[id]; });
+    const right = t.members.filter(id => r.answers[id] && r.answers[id].correct).length;
+    t.lastPct = present.length ? right / present.length : 0;
+    t.gain = r.step * t.lastPct; t.pos += t.gain;
+  });
+  // surprise event
+  const chance = { off: 0, some: 0.25, often: 0.5 }[r.opts.events] || 0;
+  if (chance && randFloat() < chance && r.i < r.qs.length - 1) {
+    const kind = ['boost', 'all', 'back'][rand(3)];
+    if (kind === 'all') { r.teams.forEach(t => { t.pos += r.step * 0.25; }); r.msg.push(th.events.all()); }
+    else {
+      const t = r.teams[rand(r.teams.length)];
+      if (kind === 'boost') { t.pos += r.step * 0.5; r.msg.push(th.events.boost(t.name)); }
+      else { const floor = raceZoneFloor(r.theme, t.pos); const np = Math.max(floor, t.pos - r.step * 0.35); if (np < t.pos) { t.pos = np; r.msg.push(th.events.back(t.name)); } }
+    }
+  }
+  // first team into a new zone/stop: a fun fact for everyone
+  const lead = Math.max(...r.teams.map(t => t.pos));
+  th.stops.forEach(s => { if (s.at > 0 && s.at < 100 && lead >= s.at && !r.reached.has(s.at)) { r.reached.add(s.at); r.msg.push('📍 ' + s.fact); } });
+  // report
+  const q = raceQ(), qid = raceQid();
+  H.report.raceCount = (H.report.raceCount || 0) + 1;
+  H.report.questions.push({ qid, n: 3000 + H.report.raceCount, label: 'R' + H.report.raceCount, type: q.type, text: q.text });
+  H.report.answers[qid] = {};
+  for (const [sid, a] of Object.entries(r.answers)) H.report.answers[qid][sid] = { raw: a.raw, a: answerText(q, a.raw), correct: a.correct, t: a.t };
+  H.reportDirty = true;
+  if (r.teams.some(t => t.pos >= 100)) raceFinish(false);
+  else { if (r.i + 1 >= r.qs.length) r.lastQ = true; broadcastView(); renderHostStage(); }
+}
+function raceFinish(outOfQuestions) {
+  const r = H.race, th = RACE_THEMES[r.theme];
+  const best = r.teams.slice().sort((a, b) => b.pos - a.pos || (b.lastPct || 0) - (a.lastPct || 0))[0];
+  r.winner = r.teams.indexOf(best); r.phase = 'won';
+  r.prev = r.prev || r.teams.map(t => t.pos);
+  r.winText = best.pos >= 100 && !outOfQuestions ? th.win(best.name) : th.deepest(best.name);
+  broadcastView(); renderHostStage();
+}
+function raceAnswer(st, m) {
+  const r = H.race, q = raceQ();
+  if (r.phase !== 'question' || !q || m.qid !== raceQid() || r.answers[st.id]) return;
+  const a = sanitizeAnswer(q, m.a); if (a == null) return;
+  if (!st.demo) raceEnsureTeam(st);
+  r.answers[st.id] = { raw: a, correct: grade(q, a), t: Date.now() };
+  if (r.answers[st.id].correct) r.myCorrect[st.id] = (r.myCorrect[st.id] || 0) + 1;
+  send(st, { t: 'ack', qid: m.qid }); send(st, viewMsg(st));
+  r.dirty = true;
+  const real = Object.keys(r.answers).filter(id => !isDemoId(id)).length;
+  if (real >= onlineStudents().length) setTimeout(() => { if (H && H.race && H.race.phase === 'question') raceReveal(); }, 700);
+}
+function raceTick(now) {
+  const r = H.race; if (!r || !r.active) return;
+  if (r.phase === 'question' && r.endAt && now >= r.endAt) { raceReveal(); return; }
+  if (r.dirty) { r.dirty = false; const c = $('#race-answered'); if (c) c.textContent = Object.keys(r.answers).filter(id => !isDemoId(id)).length + ' of ' + onlineStudents().length + ' answered'; }
+  const t = $('#race-timer'); if (t && r.endAt) t.textContent = '⏱ ' + fmtTime(r.endAt - now);
+}
+function racePublicTeams() { return H.race.teams.map(t => ({ name: t.name, emoji: t.emoji, color: t.color, pos: Math.round(t.pos * 10) / 10 })); }
+function raceView(base, st) {
+  const r = H.race;
+  if (!st.demo) raceEnsureTeam(st);
+  const k = raceTeamOf(st.id), mine = r.answers[st.id];
+  const mates = k >= 0 ? r.teams[k].members.filter(id => id !== st.id).map(id => (H.students.get(id) || {}).name).filter(Boolean).map(nm => nm.replace(/\s\(\d+\)$/, '').split(' ')[0]) : [];
+  const v = { ...base, k: 'race', theme: r.theme, phase: r.phase, teams: racePublicTeams(), prev: r.prev ? r.prev.map(p => Math.round(p * 10) / 10) : null,
+    myTeam: k, mates, i: r.i, n: r.qs.length, msg: r.msg, myRight: r.myCorrect[st.id] || 0, last: !!r.lastQ };
+  if (r.phase === 'question' || r.phase === 'reveal') { v.q = r.pub; v.mine = mine ? mine.raw : null; }
+  if (r.phase === 'question' && r.endAt) v.left = Math.max(0, Math.round(r.endAt - performance.now()));
+  if (r.phase === 'reveal' || (r.phase === 'won' && r.i >= 0)) {
+    v.my = { answered: !!mine, correct: !!(mine && mine.correct), answer: raceQ() ? correctText(raceQ()) : '' };
+    if (k >= 0) v.teamGain = Math.round(r.teams[k].gain * 10) / 10;
+  }
+  if (r.phase === 'won') { v.winner = r.winner; v.winText = r.winText; }
+  return v;
+}
+function raceEnd() { H.race.active = false; broadcastView(); renderHostStage(); renderHostSide(); }
+function renderRaceStage(stage) {
+  const r = H.race, th = RACE_THEMES[r.theme], q = raceQ();
+  stage.append(raceScene({ teams: racePublicTeams(), phase: r.phase, myTeam: -1 }, r.prev));
+  r.prev = r.teams.map(t => t.pos);
+  const panel = el('div', { class: 'q-card race-panel' });
+  const btn = (label, fn, cls) => el('button', { class: 'btn ' + (cls || ''), onclick: fn }, label);
+  const roster = el('div', { class: 'race-teams' }, r.teams.map(t => el('div', { class: 'race-team', style: 'border-color:' + t.color },
+    el('strong', null, t.emoji + ' Team ' + t.name + ' '), el('span', { class: 'muted' }, th.where(t.pos)),
+    el('div', { class: 'sname race-members' }, t.members.map(id => (H.students.get(id) || {}).name).filter(Boolean).join(', ') || '—'))));
+  if (r.phase === 'teams') {
+    panel.append(el('div', { class: 'q-text' }, th.icon + ' ' + th.title + ': ' + r.teams.length + ' teams, ' + r.qs.length + ' questions. First team to ' + th.goalName + ' wins!'), roster,
+      el('div', { class: 'spin-buttons' }, btn('🔀 Shuffle teams', () => { const o = r.opts; raceStart(o); }), btn('🏁 Start the race', raceNext, 'btn-sun'), btn('End race', raceEnd, 'btn-ghost')));
+  } else if (r.phase === 'question') {
+    panel.append(el('div', { class: 'tag' }, 'Question ' + (r.i + 1) + ' of ' + r.qs.length + ' · ' + TYPE_LABEL[q.type]), el('div', { class: 'q-text', text: q.text }),
+      el('div', { class: 'host-q-meta' }, el('span', { class: 'count-pill', id: 'race-answered' }, Object.keys(r.answers).filter(id => !isDemoId(id)).length + ' of ' + onlineStudents().length + ' answered'),
+        r.endAt ? el('span', { class: 'timer-pill', id: 'race-timer' }, '') : null, btn('Show the answer now', raceReveal), btn('End race', raceEnd, 'btn-ghost')));
+  } else if (r.phase === 'reveal') {
+    panel.append(el('div', { class: 'tag' }, 'Question ' + (r.i + 1) + ' of ' + r.qs.length), el('div', { class: 'q-text', text: q.text }),
+      el('p', null, el('strong', null, 'Answer: '), correctText(q)),
+      el('div', { class: 'race-gains' }, r.teams.map(t => el('span', { class: 'count-pill', style: 'background:' + t.color + '22' }, t.emoji + ' ' + Math.round((t.lastPct || 0) * 100) + '% right'))),
+      r.msg.length ? el('div', { class: 'race-msg' }, r.msg.map(m => el('p', null, m))) : null,
+      el('div', { class: 'spin-buttons' }, btn(r.lastQ ? 'See who wins' : 'Next question ▶', raceNext, 'btn-primary'), btn('End race', raceEnd, 'btn-ghost')));
+  } else {
+    panel.append(el('div', { class: 'q-text' }, r.winText), roster,
+      el('div', { class: 'spin-buttons' }, btn('🔁 Race again (new teams)', () => raceStart(r.opts), 'btn-sun'), btn('End race', raceEnd, 'btn-primary')));
+    setTimeout(() => confetti($('#h-stage .race-scene')), 600);
+  }
+  stage.append(panel);
+}
+
+/* ---------- student ---------- */
+function buildRaceView(v) {
+  const th = RACE_THEMES[v.theme], box = el('div', { class: 'race-student' });
+  const t = v.myTeam >= 0 ? v.teams[v.myTeam] : null;
+  if (t) box.append(el('div', { class: 'race-myteam', style: 'border-color:' + t.color },
+    el('strong', null, 'You’re on ' + t.emoji + ' Team ' + t.name + '!'), v.mates.length ? el('span', { class: 'muted' }, ' With ' + v.mates.join(', ')) : null));
+  box.append(raceScene(v, S.racePrev && S.racePrev.length === v.teams.length ? S.racePrev : v.prev));
+  S.racePrev = v.teams.map(x => x.pos);
+  if (v.phase === 'teams') box.append(msgCard(th.icon, th.title, 'Work with your team. The first team to reach ' + th.goalName + ' wins!'));
+  else if (v.phase === 'question') {
+    const card = buildStudentQ({ ...v, k: 'q', phase: v.mine != null ? 'closed' : 'open', mine: v.mine });
+    card.prepend(el('div', { class: 'boss-qtop' }, el('span', { class: 'tag' }, 'Question ' + (v.i + 1) + ' of ' + v.n), v.left != null ? el('span', { class: 'timer-pill', id: 'race-st-timer' }, '⏱ ' + fmtTime(v.left)) : null));
+    if (v.mine != null) { const p = [...card.querySelectorAll('p.muted')].pop(); if (p) p.textContent = 'Locked in! Waiting for your team…'; }
+    box.append(card);
+    clearInterval(S.raceTimerT);
+    if (v.left != null) { const end = Date.now() + v.left; S.raceTimerT = setInterval(() => { const x = $('#race-st-timer'); if (!x) { clearInterval(S.raceTimerT); return; } x.textContent = '⏱ ' + fmtTime(end - Date.now()); }, 250); }
+  } else if (v.phase === 'reveal') {
+    const my = v.my || {};
+    box.append(el('div', { class: 'q-card' },
+      el('div', { class: 'result-mine big' }, my.correct ? '✓ You got it! That helps your team.' : my.answered ? 'Not this time. The answer: ' + my.answer : 'No answer this time. The answer: ' + my.answer),
+      t ? el('p', { class: 'boss-result' }, t.emoji + ' Your team is now ' + th.where(t.pos) + '.') : null,
+      v.msg.length ? el('div', { class: 'race-msg' }, v.msg.map(m => el('p', null, m))) : null));
+  } else {
+    const won = v.winner === v.myTeam;
+    box.append(msgCard(won ? '🏆' : '🌊', v.winText, (won ? 'Your team won! ' : 'Great diving! ') + 'You got ' + v.myRight + ' right' + (t ? ', and your team reached ' + th.where(t.pos) + '.' : '.')));
+    if (won) setTimeout(() => confetti(box.querySelector('.race-scene')), 600);
+  }
+  return box;
+}
 
 /* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
@@ -3600,6 +3869,7 @@ function init() {
   $('#h-wb').addEventListener('click', () => wbStart());
   $('#h-gametime').addEventListener('click', openGameLauncher);
   $('#h-boss').addEventListener('click', bossSetup);
+  $('#h-race').addEventListener('click', raceSetup);
   $('#h-game').addEventListener('click', () => showGameHost(true));
   $('#game-host-back').addEventListener('click', () => showGameHost(false));
   $('#game-host-end').addEventListener('click', endGame);

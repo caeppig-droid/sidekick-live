@@ -287,6 +287,23 @@ body.safe .sname-list { filter: blur(6px); }
 .st-help { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; padding: 8px; background: #FFF2D0; border-bottom: 2px solid var(--sun-deep); font-weight: 700; }
 .join-help-line { text-align: center; margin: 8px 0 0; }
 
+/* team race */
+.race-scene { flex: none; width: min(100%, 900px, calc((100dvh - 430px) * 1.613)); min-width: min(100%, 420px); margin: 0 auto; position: relative; overflow: hidden; border-radius: var(--radius-lg); border: 3px solid var(--ink); }
+.race-svg { display: block; width: 100%; height: auto; }
+.race-token { transition: transform 1.4s cubic-bezier(.3,.8,.3,1); }
+.race-student .race-scene { width: min(100%, calc(42dvh * 1.613)); }
+.race-student { width: 100%; max-width: 50em; display: grid; gap: 10px; }
+.race-myteam { background: #fff; border: 3px solid var(--ink); border-radius: var(--radius); padding: 8px 12px; text-align: center; }
+.race-panel { max-width: 900px; margin: 12px auto 0; }
+.race-teams { display: grid; grid-template-columns: repeat(auto-fit, minmax(13em, 1fr)); gap: 8px; margin: 8px 0; }
+.race-team { border: 3px solid; border-radius: var(--radius-sm); padding: 6px 10px; background: #fff; }
+.race-members { font-size: .85rem; }
+.race-gains { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.race-msg { background: #FFF4D6; border-radius: var(--radius); padding: 4px 12px; margin: 8px 0; font-weight: 600; }
+.race-msg p { margin: 6px 0; }
+.tool-race { background: #DDF1FF; }
+body.safe .race-members { filter: blur(6px); }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }
