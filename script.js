@@ -660,7 +660,7 @@ function spotCard(items) {
   return el('div', { class: 'spot-card' }, el('h3', null, '🔦 Spotlight'),
     el('div', { class: items.some(i => i.d) ? 'spot-draws' : '' }, items.map(i => {
       const by = el('span', { class: 'by', text: i.by || 'A classmate' });
-      if (i.wb) return el('div', { class: 'spot-item' }, by, wbMini(i.wb, 'big'));
+      if (i.wb) return el('div', { class: 'spot-item' }, by, wbMini(i.wb, 'big', i.syl || null));
       if (i.d) {
         const c = document.createElement('canvas'), u = mediaUrl(i.bg);
         let img = null; if (u) { img = new Image(); img.src = u; img.onload = () => renderDrawing(c, i.d.s, img, i.aspect, 520); }
@@ -1040,6 +1040,7 @@ function hostOnData(conn, m) {
     case 'vol': if (H.signup && st.vol !== !!m.on) { st.vol = !!m.on; H.rosterDirty = true; renderSpinPool(); saveHostSnap(); } break;
     case 'rx': hostReaction(st, m.e); break;
     case 'wbb': wbBoardMsg(st, m); break;
+    case 'wbc': wbCountMsg(st, m); break;
   }
 }
 function hostHello(conn, m) {
@@ -2473,16 +2474,19 @@ const WB_GROUPS = [
   { id: 'other', name: 'Other', cls: 'g-other', tiles: ['ck', 'ng', 'nk', 'ed', 'ing'] },
   { id: 'rcontrol', name: 'R-controlled vowels', cls: 'g-r', tiles: ['ar', 'er', 'ir', 'or', 'ur'] },
   { id: 'teams', name: 'Vowel teams', cls: 'g-team', tiles: ['ai', 'ay', 'ea', 'ee', 'igh', 'oa', 'oo', 'ow', 'au', 'aw'] },
-  { id: 'diph', name: 'Diphthongs', cls: 'g-diph', tiles: ['oi', 'oy', 'ou', 'ow'] }
+  { id: 'diph', name: 'Diphthongs', cls: 'g-diph', tiles: ['oi', 'oy', 'ou', 'ow'] },
+  { id: 'syll', name: 'Syllables & word parts', cls: 'g-syll', tiles: ['le', 'ble', 'dle', 'tle', 'tion', 'ture', 'un', 're', 'pre', 'ful', 'less', 'est'] }
 ];
+const WB_WORDPARTS = new Set(WB_GROUPS.find(g => g.id === 'syll').tiles);
 const WB_PRESETS = {
   k: { label: 'Letters only (K)', groups: ['letters'] },
   g1: { label: 'Letters, digraphs & other (Gr 1)', groups: ['letters', 'digraphs', 'other'] },
   full: { label: 'Full board', groups: ['letters', 'digraphs', 'other', 'rcontrol', 'teams', 'diph'] },
+  fullplus: { label: 'Full board + word parts', groups: ['letters', 'digraphs', 'other', 'rcontrol', 'teams', 'diph', 'syll'] },
   custom: { label: 'My custom board', groups: null }
 };
 const WB_VOWELS = new Set(['a', 'e', 'i', 'o', 'u']);
-function wbSettings() { return Object.assign({ preset: 'full', groups: ['letters', 'digraphs', 'other'], extra: '', chain: true, hear: true }, lsGet(KEYS.wbTiles, {})); }
+function wbSettings() { return Object.assign({ preset: 'full', groups: ['letters', 'digraphs', 'other'], extra: '', chain: true, hear: true, input: 'tiles', countStep: false }, lsGet(KEYS.wbTiles, {})); }
 function wbSaveSettings(cfg) { lsSet(KEYS.wbTiles, cfg); }
 function wbBuildGroups(cfg) {
   const ids = cfg.preset === 'custom' ? (cfg.groups || []) : (WB_PRESETS[cfg.preset] || WB_PRESETS.full).groups;
@@ -2496,21 +2500,44 @@ function wbAllTiles(groups) { return [...new Set(groups.flatMap(g => g.tiles))];
 function wbSplit(word, tiles) {
   const w = String(word).toLowerCase().trim();
   if (/[-.·\s]/.test(w)) return w.split(/[-.·\s]+/).filter(Boolean);
-  // longest-match using the tiles on this board ("ed" is left out: red = r·e·d)
-  const list = tiles.filter(t => t !== 'ed').sort((a, b) => b.length - a.length), out = [];
+  // a whole syllable that is a word-part tile (tion, ture, ble…) stays one box
+  if (WB_WORDPARTS.has(w) && tiles.includes(w)) return [w];
+  // longest-match using the tiles on this board ("ed" and word parts are left out: red = r·e·d)
+  const list = tiles.filter(t => t !== 'ed' && !WB_WORDPARTS.has(t)).sort((a, b) => b.length - a.length), out = [];
   let i = 0;
   while (i < w.length) { const t = list.find(x => w.startsWith(x, i)); if (t) { out.push(t); i += t.length; } else { out.push(w[i]); i++; } }
   return out;
 }
 function wbResize(arr, n) { const b = (arr || []).slice(0, n); while (b.length < n) b.push(''); return b; }
 function wbIsCorrect(b, target) { return !!target && b.length === target.length && b.every((x, i) => x === target[i]); }
+/* Syllables: the teacher types breaks with a slash (car/pet). syl = sounds per syllable, parts = syllable spellings */
+function wbSylParts(word, tiles) {
+  const w = String(word).toLowerCase().trim();
+  if (w.includes('/')) {
+    const sy = w.split('/').map(x => x.trim()).filter(Boolean), segs = sy.map(x => wbSplit(x, tiles));
+    return { target: segs.flat(), syl: segs.map(x => x.length), parts: segs.map(x => x.join('')) };
+  }
+  const t = wbSplit(w, tiles); return { target: t, syl: null, parts: [t.join('')] };
+}
+function wbSlices(arr, syl) { if (!syl) return [arr]; const out = []; let k = 0; for (const n of syl) { out.push(arr.slice(k, k + n)); k += n; } return out; }
+function wbBoardLen(wb) { return wb.input === 'type' ? (wb.target ? wb.parts.length : wb.n) : wb.n; }
+function wbCheck(wb, b) {
+  if (!wb.target || !b) return null;
+  if (wb.input === 'type') { const per = wb.parts.map((p, i) => String(b[i] || '').toLowerCase().replace(/[^a-z'-]/g, '') === p); return { correct: per.every(Boolean), per }; }
+  const ts = wbSlices(wb.target, wb.syl), bs = wbSlices(b, wb.syl);
+  const per = ts.map((t, i) => t.length === (bs[i] || []).length && t.every((x, j) => x === bs[i][j]));
+  return { correct: per.every(Boolean), per };
+}
+function wbBuiltText(wb, b) { return wb.input === 'type' ? b.map(x => x || '_').join('/') : wbSlices(b, wb.syl).map(x => x.map(y => y || '_').join('-')).join(' / '); }
+function wbTargetText(wb) { return wb.syl ? wb.parts.join('/') + ' (' + wbSlices(wb.target, wb.syl).map(x => x.join('-')).join(' / ') + ')' : wb.target.join('-'); }
 
 /* ---------- teacher ---------- */
 function wbStart() {
   if ((H.boss && H.boss.active) || (H.race && H.race.active)) { toast('End the game first.'); return; }
   if (H.wb && H.wb.active) { renderHostStage(); return; }
   const cfg = wbSettings();
-  H.wb = { active: true, round: 0, cid: 0, n: 3, target: null, word: '', chain: cfg.chain !== false, hear: cfg.hear !== false, phase: 'build', showAns: false,
+  H.wb = { active: true, round: 0, cid: 0, n: 3, target: null, syl: null, parts: null, word: '', chain: cfg.chain !== false, hear: cfg.hear !== false,
+    input: cfg.input === 'type' ? 'type' : 'tiles', countStep: !!cfg.countStep, counts: {}, phase: 'build', showAns: false,
     groups: wbBuildGroups(cfg), preset: cfg.preset, boards: {}, qids: {} };
   H.spotlight = null; broadcast({ t: 'spot', items: null });
   broadcastView(); renderHostStage(); saveHostSnap();
@@ -2520,18 +2547,27 @@ function wbEnd() {
   broadcastView(); renderHostStage(); renderHostSide(); saveHostSnap();
 }
 function wbView(base, st) {
-  const wb = H.wb, b = wb.boards[st.id] || null;
-  return { ...base, k: 'wb', r: wb.round, cid: wb.cid, n: wb.n, groups: wb.groups, phase: wb.phase, free: !wb.target,
+  const wb = H.wb, b = wb.boards[st.id] || null, chk = wb.phase === 'check' ? wbCheck(wb, b) : null;
+  const counting = !!(wb.countStep && wb.syl);
+  return { ...base, k: 'wb', r: wb.round, cid: wb.cid, n: wbBoardLen(wb), groups: wb.groups, phase: wb.phase, free: !wb.target,
+    syl: wb.input === 'type' ? null : wb.syl, sylN: wb.syl ? wb.syl.length : (wb.target ? 1 : 0), input: wb.input,
+    countStep: counting, myCount: wb.counts[st.id] != null ? wb.counts[st.id] : null,
     say: wb.hear && wb.target ? wb.word : null, mine: b,
-    result: wb.phase === 'check' && wb.target ? { built: !!(b && b.some(Boolean)), correct: !!(b && wbIsCorrect(b, wb.target)) } : null,
-    answer: wb.phase === 'check' && wb.showAns && wb.target ? wb.target : null };
+    result: chk ? { built: !!(b && b.some(Boolean)), correct: chk.correct, per: wb.syl ? chk.per : null,
+      count: counting ? { mine: wb.counts[st.id] != null ? wb.counts[st.id] : null, right: wb.syl.length } : null } : null,
+    answer: wb.phase === 'check' && wb.showAns && wb.target ? (wb.input === 'type' ? { tiles: wb.parts, syl: null } : { tiles: wb.target, syl: wb.syl }) : null };
 }
 function wbBoardMsg(st, m) {
-  const wb = H.wb;
-  if (!wb || !wb.active || wb.phase !== 'build' || m.r !== wb.round || m.cid !== wb.cid || !Array.isArray(m.b) || m.b.length !== wb.n) return;
-  const ok = new Set(wbAllTiles(wb.groups));
-  wb.boards[st.id] = m.b.map(x => (typeof x === 'string' && ok.has(x)) ? x : '');
+  const wb = H.wb, len = wb ? wbBoardLen(wb) : 0;
+  if (!wb || !wb.active || wb.phase !== 'build' || m.r !== wb.round || m.cid !== wb.cid || !Array.isArray(m.b) || m.b.length !== len) return;
+  if (wb.input === 'type') wb.boards[st.id] = m.b.map(x => typeof x === 'string' ? x.toLowerCase().replace(/[^a-z'-]/g, '').slice(0, 14) : '');
+  else { const ok = new Set(wbAllTiles(wb.groups)); wb.boards[st.id] = m.b.map(x => (typeof x === 'string' && ok.has(x)) ? x : ''); }
   H.wbDirty = true;
+}
+function wbCountMsg(st, m) {
+  const wb = H.wb;
+  if (!wb || !wb.active || !wb.countStep || !wb.syl || m.r !== wb.round || !Number.isInteger(m.n) || m.n < 1 || m.n > 6) return;
+  wb.counts[st.id] = m.n; H.wbDirty = true;
 }
 function wbRecord() {
   const wb = H.wb; if (!wb || !wb.round) return;
@@ -2542,16 +2578,21 @@ function wbRecord() {
     qid = wb.qids[wb.round] = 'wb-' + uid(6);
     H.report.wbCount = (H.report.wbCount || 0) + 1;
     H.report.questions.push({ qid, n: 1000 + H.report.wbCount, label: 'W' + H.report.wbCount, type: 'wordbuild',
-      text: wb.target ? 'Build: ' + wb.target.join('-') : 'Free build (' + wb.n + ' boxes)', graded: !!wb.target });
+      text: wb.target ? 'Build: ' + wbTargetText(wb) : 'Free build (' + wb.n + ' boxes)', graded: !!wb.target });
   }
   const ans = H.report.answers[qid] = {};
-  filled.forEach(([sid, b]) => { ans[sid] = { raw: b.slice(), a: b.map(x => x || '_').join('-'), correct: wb.target ? wbIsCorrect(b, wb.target) : null, t: Date.now() }; });
+  filled.forEach(([sid, b]) => {
+    const c = wbCheck(wb, b), cnt = wb.countStep && wb.syl && wb.counts[sid] != null ? '  (counted ' + wb.counts[sid] + (wb.counts[sid] === wb.syl.length ? ' ✓' : ', is ' + wb.syl.length) + ')' : '';
+    ans[sid] = { raw: b.slice(), a: wbBuiltText(wb, b) + cnt, correct: c ? c.correct : null, t: Date.now() };
+  });
   H.reportDirty = true;
 }
-function wbNewRound(target, n) {
+function wbNewRound(target, n, syl, parts) {
   const wb = H.wb; wbRecord();
-  wb.round++; wb.target = target; wb.word = target ? target.join('') : ''; wb.n = n; wb.phase = 'build'; wb.showAns = false;
-  if (wb.chain) for (const id in wb.boards) wb.boards[id] = wbResize(wb.boards[id], n);
+  wb.round++; wb.target = target; wb.syl = syl || null; wb.parts = parts || null; wb.word = target ? target.join('') : '';
+  wb.n = n; wb.phase = 'build'; wb.showAns = false; wb.counts = {};
+  const len = wbBoardLen(wb);
+  if (wb.chain) for (const id in wb.boards) wb.boards[id] = wbResize(wb.boards[id], len);
   else wb.boards = {};
   H.spotlight = null; broadcast({ t: 'spot', items: null });
   broadcastView(); renderHostStage(); saveHostSnap();
@@ -2559,12 +2600,13 @@ function wbNewRound(target, n) {
 function wbSend(raw) {
   const word = cleanText(raw, 40).trim();
   if (!word) { toast('Type a word first.'); return; }
-  const parts = wbSplit(word, wbAllTiles(H.wb.groups));
-  if (parts.length > 8) { toast('8 sounds is the most.'); return; }
-  wbNewRound(parts, parts.length);
+  const x = wbSylParts(word, wbAllTiles(H.wb.groups));
+  if (x.target.length > 12) { toast('12 sounds is the most.'); return; }
+  if (x.syl && x.syl.length > 5) { toast('5 syllables is the most.'); return; }
+  wbNewRound(x.target, x.target.length, x.syl, x.parts);
 }
 function wbSetPhase(ph) { const wb = H.wb; wb.phase = ph; if (ph === 'check') wbRecord(); else wb.showAns = false; broadcastView(); renderHostStage(); saveHostSnap(); }
-function wbClearBoards() { const wb = H.wb; wb.boards = {}; wb.cid++; wb.phase = 'build'; wb.showAns = false; broadcastView(); renderHostStage(); saveHostSnap(); toast('Boards cleared.'); }
+function wbClearBoards() { const wb = H.wb; wb.boards = {}; wb.counts = {}; wb.cid++; wb.phase = 'build'; wb.showAns = false; broadcastView(); renderHostStage(); saveHostSnap(); toast('Boards cleared.'); }
 function wbCustomize() {
   const cfg = wbSettings();
   openModal((card, close) => {
@@ -2580,26 +2622,36 @@ function wbCustomize() {
         el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
   });
 }
-function wbMini(b, cls) { return el('div', { class: 'wb-mini' + (cls ? ' ' + cls : '') }, (b || []).map(t => el('span', { class: 'wb-mini-box' }, t || '\u00a0'))); }
+function wbMini(b, cls, syl, per) {
+  const box = t => el('span', { class: 'wb-mini-box' }, t || '\u00a0');
+  if (!syl) return el('div', { class: 'wb-mini' + (cls ? ' ' + cls : '') }, (b || []).map(box));
+  return el('div', { class: 'wb-mini syl' + (cls ? ' ' + cls : '') }, wbSlices(b || [], syl).map((g, i) =>
+    el('span', { class: 'wb-mini-syl' + (per ? (per[i] ? ' good' : ' bad') : '') }, g.map(box))));
+}
 function renderWbStage(stage) {
-  const wb = H.wb, cfg = wbSettings();
-  const inp = el('input', { id: 'wb-word', maxlength: 40, placeholder: 'Next word, e.g. ship (or sh-i-p)', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Next word' });
+  const wb = H.wb;
+  const inp = el('input', { id: 'wb-word', maxlength: 40, placeholder: 'Next word: ship, sh-i-p, or car/pet for syllables', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Next word' });
   const prev = el('span', { class: 'wb-preview', 'aria-live': 'polite' });
   const tiles = wbAllTiles(wb.groups);
   const showPrev = () => {
     const v = inp.value.trim(); if (!v) { prev.textContent = ''; return; }
-    const parts = wbSplit(v, tiles), missing = parts.filter(p => !tiles.includes(p));
-    prev.textContent = parts.join(' · ') + '  (' + parts.length + ' sound' + (parts.length === 1 ? '' : 's') + ')' + (missing.length ? '  ⚠ not on the board: ' + missing.join(', ') : '');
+    const x = wbSylParts(v, tiles), missing = wb.input === 'type' ? [] : x.target.filter(p => !tiles.includes(p));
+    const sounds = x.target.length + ' sound' + (x.target.length === 1 ? '' : 's');
+    prev.textContent = (x.syl ? x.parts.join(' | ') + '  →  ' + wbSlices(x.target, x.syl).map(g => g.join('·')).join(' | ') + '  (' + x.syl.length + ' syllables, ' + sounds + ')'
+      : x.target.join(' · ') + '  (' + sounds + ')') + (missing.length ? '  ⚠ not on the board: ' + missing.join(', ') : '');
   };
   inp.addEventListener('input', showPrev);
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); wbSend(inp.value); } });
-  const tog = (label, key) => { const i = el('input', { type: 'checkbox' }); i.checked = wb[key]; i.addEventListener('change', () => { wb[key] = i.checked; const c = wbSettings(); c[key] = i.checked; wbSaveSettings(c); broadcastView(); saveHostSnap(); }); return el('label', { class: 'check small' }, i, label); };
+  const tog = (label, key, after) => { const i = el('input', { type: 'checkbox' }); i.checked = wb[key]; i.addEventListener('change', () => { wb[key] = i.checked; const c = wbSettings(); c[key] = i.checked; wbSaveSettings(c); if (after) after(); broadcastView(); saveHostSnap(); }); return el('label', { class: 'check small' }, i, label); };
   const preset = el('select', { 'aria-label': 'Tile board' }, Object.entries(WB_PRESETS).map(([k, p]) => el('option', { value: k }, p.label)));
   preset.value = wb.preset || 'full';
   preset.addEventListener('change', () => { const c = wbSettings(); c.preset = preset.value; wbSaveSettings(c); wb.preset = preset.value; wb.groups = wbBuildGroups(c); broadcastView(); renderHostStage(); saveHostSnap(); });
+  const mode = el('select', { 'aria-label': 'How students spell' }, el('option', { value: 'tiles' }, 'Students use tiles'), el('option', { value: 'type' }, 'Students type each syllable (Gr 3+)'));
+  mode.value = wb.input;
+  mode.addEventListener('change', () => { wb.input = mode.value; const c = wbSettings(); c.input = mode.value; wbSaveSettings(c); wb.boards = {}; wb.cid++; broadcastView(); renderHostStage(); saveHostSnap(); toast(mode.value === 'type' ? 'Students now type each syllable.' : 'Students now use tiles.'); });
   const freeN = el('select', { 'aria-label': 'Boxes for free build' }, [2, 3, 4, 5, 6].map(n => el('option', { value: String(n) }, n + ' boxes')));
   freeN.value = String(Math.min(6, Math.max(2, wb.n)));
-  const status = wb.round === 0 ? 'Type a word below and press Send.' : wb.target ? 'Word ' + wb.round + ': ' + wb.target.join(' · ') : 'Free build: ' + wb.n + ' boxes';
+  const status = wb.round === 0 ? 'Type a word below and press Send. Use / between syllables: car/pet.' : wb.target ? 'Word ' + wb.round + ': ' + (wb.syl ? wb.parts.join(' | ') + '  (' + wbSlices(wb.target, wb.syl).map(g => g.join('·')).join(' | ') + ')' : wb.target.join(' · ')) : 'Free build: ' + wb.n + ' boxes';
   stage.append(el('div', { class: 'q-card wb-host' },
     el('div', { class: 'tag', text: '🔤 Word builder' }), el('div', { class: 'q-text', text: status }),
     el('div', { class: 'row-inline' }, inp, el('button', { class: 'btn btn-primary', onclick: () => wbSend(inp.value) }, wb.round ? 'Send next word' : 'Send word')), prev,
@@ -2612,7 +2664,9 @@ function renderWbStage(stage) {
       H.spotlight ? el('button', { class: 'btn', onclick: () => { H.spotlight = null; broadcast({ t: 'spot', items: null }); renderHostStage(); } }, 'Hide spotlight') : null,
       el('button', { class: 'btn btn-ghost', onclick: wbEnd }, 'End word builder')),
     el('div', { class: 'row-inline wb-opts' }, tog('Word chain: keep boards for the next word', 'chain'), tog('Students can tap 🔊 to hear the word', 'hear'),
-      el('span', { class: 'row-inline' }, el('span', { class: 'muted' }, 'Tiles:'), preset, el('button', { class: 'btn btn-small', onclick: wbCustomize }, 'Customize…')))));
+      tog('Ask “How many syllables?” first (words with /)', 'countStep')),
+    el('div', { class: 'row-inline wb-opts' }, mode,
+      wb.input === 'tiles' ? el('span', { class: 'row-inline' }, el('span', { class: 'muted' }, 'Tiles:'), preset, el('button', { class: 'btn btn-small', onclick: wbCustomize }, 'Customize…')) : null)));
   stage.append(el('div', { class: 'wb-summary', id: 'wb-summary' }), el('div', { class: 'wb-gallery', id: 'wb-gallery' }));
   renderWbGallery();
   setTimeout(() => { if (document.activeElement === document.body) inp.focus(); }, 0);
@@ -2620,49 +2674,97 @@ function renderWbStage(stage) {
 function renderWbGallery() {
   const g = $('#wb-gallery'), sum = $('#wb-summary'); if (!g || !H.wb) return;
   H.wbDirty = false;
-  const wb = H.wb, on = [...H.students.values()].filter(s => s.online || wb.boards[s.id]).sort((a, b) => naturalSort(a.name, b.name));
-  const right = on.filter(s => wb.boards[s.id] && wbIsCorrect(wb.boards[s.id], wb.target)).length;
-  const started = on.filter(s => wb.boards[s.id] && wb.boards[s.id].some(Boolean)).length;
-  sum.textContent = !wb.round ? '' : wb.target ? started + ' of ' + on.length + ' building  ·  ' + right + ' have it right (only you see this)' : started + ' of ' + on.length + ' building';
+  const wb = H.wb, on = [...H.students.values()].filter(s => !s.demo && (s.online || wb.boards[s.id])).sort((a, b) => naturalSort(a.name, b.name));
+  const len = wbBoardLen(wb);
+  const started = on.filter(s => wb.boards[s.id] && wb.boards[s.id].some(Boolean));
+  const checks = started.map(s => wbCheck(wb, wb.boards[s.id])).filter(Boolean);
+  const right = checks.filter(c => c.correct).length;
+  const bits = [];
+  if (wb.round) bits.push(started.length + ' of ' + on.length + ' building');
+  if (wb.target) bits.push(right + ' have it right');
+  if (wb.syl && checks.length) {
+    const miss = wb.syl.map((_, i) => checks.filter(c => !c.per[i]).length), worst = Math.max(...miss);
+    if (worst > 0) bits.push('Syllable ' + (miss.indexOf(worst) + 1) + ' missed most (' + worst + ')');
+  }
+  if (wb.countStep && wb.syl) { const cs = Object.entries(wb.counts).filter(([id]) => !isDemoId(id)); if (cs.length) bits.push(cs.filter(([, n]) => n === wb.syl.length).length + ' of ' + cs.length + ' counted ' + wb.syl.length + ' syllables'); }
+  sum.textContent = bits.length ? bits.join('  ·  ') + (wb.target ? '  (only you see this)' : '') : '';
   g.replaceChildren();
   if (!wb.round) return;
   on.forEach(s => {
-    const b = wb.boards[s.id] || wbResize([], wb.n);
-    const ok = wb.target && b.some(Boolean) ? wbIsCorrect(b, wb.target) : null;
+    const b = wb.boards[s.id] || wbResize([], len);
+    const c = wb.target && b.some(Boolean) ? wbCheck(wb, b) : null, ok = c ? c.correct : null;
+    const cnt = wb.countStep && wb.syl && wb.counts[s.id] != null ? el('span', { class: 'wb-count' + (wb.counts[s.id] === wb.syl.length ? '' : ' off') }, '👏' + wb.counts[s.id]) : null;
     g.append(el('button', { class: 'wb-card' + (ok === true ? ' is-right' : ok === false ? ' is-wrong' : ''), type: 'button', title: 'Spotlight this board',
       onclick: () => wbSpotlight(s, b) },
-      el('span', { class: 'sname', text: s.name }), el('span', { class: 'wb-mark', 'aria-hidden': 'true' }, ok === true ? '✓' : ok === false ? '✗' : ''), wbMini(b)));
+      el('span', { class: 'sname', text: s.name }), el('span', { class: 'wb-mark', 'aria-hidden': 'true' }, cnt, ok === true ? ' ✓' : ok === false ? ' ✗' : ''),
+      wb.input === 'type' ? wbMini(b, null, wb.syl ? b.map(() => 1) : null, c && wb.syl ? c.per : null) : wbMini(b, null, wb.syl, c && wb.syl ? c.per : null)));
   });
 }
 function wbSpotlight(st, b) {
+  const wb = H.wb, syl = wb.input === 'type' ? (wb.syl ? b.map(() => 1) : null) : wb.syl;
   openModal((card, close) => {
-    card.append(el('h2', null, 'Spotlight this board?'), wbMini(b, 'big'),
+    const show = by => { H.spotlight = [{ wb: b.slice(), syl, by }]; broadcast({ t: 'spot', items: H.spotlight }); renderHostStage(); close(); };
+    card.append(el('h2', null, 'Spotlight this board?'), wbMini(b, 'big', syl),
       el('div', { class: 'spin-buttons' },
-        el('button', { class: 'btn btn-primary', onclick: () => { H.spotlight = [{ wb: b.slice(), by: st.name.replace(/\s\(\d+\)$/, '').split(' ')[0] }]; broadcast({ t: 'spot', items: H.spotlight }); renderHostStage(); close(); } }, 'Show with first name'),
-        el('button', { class: 'btn', onclick: () => { H.spotlight = [{ wb: b.slice(), by: null }]; broadcast({ t: 'spot', items: H.spotlight }); renderHostStage(); close(); } }, 'Show anonymously'),
+        el('button', { class: 'btn btn-primary', onclick: () => show(st.name.replace(/\s\(\d+\)$/, '').split(' ')[0]) }, 'Show with first name'),
+        el('button', { class: 'btn', onclick: () => show(null) }, 'Show anonymously'),
         el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
   });
 }
 
 /* ---------- student ---------- */
 function buildWordBoard(v) {
-  if (!S.wb || S.wb.r !== v.r || S.wb.cid !== v.cid) S.wb = { r: v.r, cid: v.cid, b: wbResize(v.mine, v.n) };
+  if (!S.wb || S.wb.r !== v.r || S.wb.cid !== v.cid) S.wb = { r: v.r, cid: v.cid, b: wbResize(v.mine, v.n), count: v.myCount };
   else if (S.wb.b.length !== v.n) S.wb.b = wbResize(S.wb.b, v.n);
+  if (S.wb.count == null && v.myCount != null) S.wb.count = v.myCount;
   const locked = v.phase !== 'build' || v.r === 0;
-  const commit = () => { sendHost({ t: 'wbb', r: v.r, cid: v.cid, b: S.wb.b.slice() }); renderStudent(); };
+  const send = () => sendHost({ t: 'wbb', r: v.r, cid: v.cid, b: S.wb.b.slice() });
+  const commit = () => { send(); renderStudent(); };
   const card = el('div', { class: 'q-card wb-card-student' });
   card.append(el('div', { class: 'wb-head' },
     el('div', { class: 'q-text', text: v.r === 0 ? 'Word builder' : v.free ? 'Build a word' : 'Build the word' }),
     v.say ? el('button', { class: 'btn', type: 'button', onclick: () => speak(v.say) }, '🔊 Hear the word') : null,
     el('button', { class: 'btn', type: 'button', 'aria-label': 'Clear my boxes', disabled: locked, onclick: () => { S.wb.b = wbResize([], v.n); commit(); } }, '↺')));
   if (v.r === 0) { card.append(el('p', { class: 'muted' }, 'Get ready! Your teacher will say a word.')); return card; }
-  const boxes = el('div', { class: 'wb-boxes', role: 'group', 'aria-label': 'Sound boxes' });
-  S.wb.b.forEach((t, i) => boxes.append(el('button', { class: 'wb-box' + (t ? ' filled' : ''), type: 'button', 'data-drop': 'b:' + i, 'data-drag': t && !locked ? 'f:' + i : null, disabled: locked,
-    'aria-label': t ? 'Box ' + (i + 1) + ': ' + t + '. Tap to clear.' : 'Box ' + (i + 1) + ', empty',
-    onclick: e => { if (e.currentTarget._dragged || !t) return; S.wb.b[i] = ''; commit(); } }, t || '\u00a0')));
-  card.append(boxes);
-  if (v.result) card.append(el('div', { class: 'result-mine' }, v.result.correct ? '✓ You built it!' : v.result.built ? 'Not quite. Look at each sound again.' : 'You didn’t build this one.'));
-  if (v.answer) card.append(el('div', { class: 'wb-answer' }, el('span', { class: 'muted' }, 'The word: '), wbMini(v.answer, 'big')));
+  // step 1 (optional): how many syllables?
+  if (v.countStep && S.wb.count == null && !locked) {
+    card.append(el('div', { class: 'wb-count-step' }, el('p', { class: 'q-text' }, 'How many syllables? Clap it out 👏'),
+      el('div', { class: 'seg' }, [1, 2, 3, 4, 5].map(n => el('button', { class: 'chip big-chip', type: 'button', onclick: () => { S.wb.count = n; sendHost({ t: 'wbc', r: v.r, cid: v.cid, n }); renderStudent(); } }, '👏 ' + n)))));
+    return card;
+  }
+  if (v.countStep && S.wb.count != null) card.append(el('p', { class: 'muted wb-counted' }, 'You counted ' + S.wb.count + ' syllable' + (S.wb.count === 1 ? '' : 's') + ' 👏'));
+  if (v.input === 'type') {
+    const row = el('div', { class: 'wb-type-row', role: 'group', 'aria-label': 'Syllable boxes' });
+    S.wb.b.forEach((t, i) => {
+      const inp = el('input', { class: 'wb-type-input', maxlength: 14, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', disabled: locked, 'aria-label': (v.n > 1 ? 'Syllable ' + (i + 1) : 'The word') });
+      inp.value = t || '';
+      inp.addEventListener('input', () => { S.wb.b[i] = inp.value.toLowerCase().replace(/[^a-z'-]/g, ''); clearTimeout(S.wbTypeT); S.wbTypeT = setTimeout(send, 250); });
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter' || (e.key === ' ' && inp.value)) { e.preventDefault(); const nx = row.querySelectorAll('input')[i + 1]; if (nx) nx.focus(); } });
+      row.append(el('label', { class: 'wb-type' }, v.n > 1 ? el('span', { class: 'wb-sylnum' }, String(i + 1)) : null, inp));
+    });
+    card.append(row);
+  } else {
+    const boxBtn = (t, i) => el('button', { class: 'wb-box' + (t ? ' filled' : ''), type: 'button', 'data-drop': 'b:' + i, 'data-drag': t && !locked ? 'f:' + i : null, disabled: locked,
+      'aria-label': t ? 'Box ' + (i + 1) + ': ' + t + '. Tap to clear.' : 'Box ' + (i + 1) + ', empty',
+      onclick: e => { if (e.currentTarget._dragged || !t) return; S.wb.b[i] = ''; commit(); } }, t || '\u00a0');
+    const boxes = el('div', { class: 'wb-boxes' + (v.syl ? ' syl' : ''), role: 'group', 'aria-label': 'Sound boxes' });
+    if (v.syl) { let k = 0; v.syl.forEach((len, si) => { const grp = el('div', { class: 'wb-sylgroup' }, el('span', { class: 'wb-sylnum' }, String(si + 1))); const inner = el('div', { class: 'wb-sylboxes' }); for (let j = 0; j < len; j++, k++) inner.append(boxBtn(S.wb.b[k], k)); grp.append(inner); boxes.append(grp); }); }
+    else S.wb.b.forEach((t, i) => boxes.append(boxBtn(t, i)));
+    card.append(boxes);
+  }
+  if (v.result) {
+    const r = v.result;
+    let msg = r.correct ? '✓ You built it!' : !r.built ? 'You didn’t build this one.' : 'Not quite. Look at each sound again.';
+    if (!r.correct && r.built && r.per && r.per.length > 1) msg = r.per.map((ok, i) => 'Syllable ' + (i + 1) + (ok ? ' ✓' : ': look again')).join('  ·  ');
+    card.append(el('div', { class: 'result-mine' }, msg));
+    if (r.count && r.count.mine != null) card.append(el('p', { class: 'muted' }, r.count.mine === r.count.right ? '👏 You counted the syllables right: ' + r.count.right + '.' : '👏 This word has ' + r.count.right + ' syllables.'));
+  }
+  if (v.answer) card.append(el('div', { class: 'wb-answer' }, el('span', { class: 'muted' }, 'The word: '), wbMini(v.answer.tiles, 'big', v.answer.syl)));
+  if (v.input === 'type') {
+    if (!locked) card.append(el('p', { class: 'manip-tip' }, v.n > 1 ? 'Type one syllable in each box. Press Enter to go to the next box.' : 'Type the word.'));
+    else if (v.phase === 'check') card.append(el('p', { class: 'muted' }, 'Boxes are locked while your teacher checks.'));
+    return card;
+  }
   // tile board (tabs on small screens)
   const small = matchMedia('(max-width: 600px)').matches && v.groups.length > 1;
   if (S.wbTab == null || S.wbTab >= v.groups.length) S.wbTab = 0;
@@ -2676,7 +2778,7 @@ function buildWordBoard(v) {
   });
   card.append(tray);
   if (!locked) {
-    card.append(el('p', { class: 'manip-tip' }, 'Tap a tile to fill the next box, or drag it into a box. Tap a box to clear it.'));
+    card.append(el('p', { class: 'manip-tip' }, v.syl ? 'Spell one syllable at a time. Tap a tile to fill the next box, or drag it. Tap a box to clear it.' : 'Tap a tile to fill the next box, or drag it into a box. Tap a box to clear it.'));
     dragKit(card, (c, target) => {
       const d = c.dataset.drag, to = target.dataset.drop;
       if (to === 'tray') { if (d.startsWith('f:')) S.wb.b[+d.slice(2)] = ''; }

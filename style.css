@@ -185,7 +185,10 @@ label { font-weight: 600; display: block; margin: .7em 0 .25em; }
 .wb-preview { display: block; min-height: 1.4em; margin: 6px 0; font-weight: 700; color: var(--ink-soft); }
 .wb-actions, .wb-opts { margin-top: 10px; }
 .wb-summary { font-weight: 700; margin: 10px 0 4px; }
-.wb-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; width: 100%; max-width: 1000px; }
+.wb-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; width: 100%; max-width: 1000px; }
+.wb-card .wb-mini { flex-wrap: wrap; row-gap: 4px; }
+.wb-card .wb-mini-box { min-width: 1.6em; padding: .1em .2em; font-size: .85rem; }
+.wb-card .wb-mini.syl { gap: 6px; }
 .wb-card { font: inherit; text-align: left; background: #fff; border: 3px solid var(--line); border-radius: var(--radius-sm); padding: 6px 8px; cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 4px; align-items: center; color: var(--ink); }
 .wb-card.is-right { border-color: #12783F; }
 .wb-card.is-wrong { border-color: #B4234F; }
@@ -225,6 +228,24 @@ label { font-weight: 600; display: block; margin: .7em 0 .25em; }
 .wb-tabs { margin-bottom: 4px; }
 @media (max-width: 600px) { .wb-group { grid-template-columns: 1fr; } }
 body.safe .wb-gallery .sname { filter: blur(6px); }
+/* word builder: syllables */
+.wb-boxes.syl { gap: 18px; flex-wrap: wrap; }
+.wb-sylgroup { display: grid; justify-items: center; gap: 4px; }
+.wb-sylboxes { display: flex; }
+.wb-sylnum { display: inline-grid; place-items: center; min-width: 1.8em; height: 1.8em; border-radius: 999px; background: var(--sun); font-weight: 800; font-size: .9rem; }
+.wb-mini.syl { gap: 10px; }
+.wb-mini-syl { display: inline-flex; gap: 3px; padding: 2px; border-radius: 7px; border: 2px solid transparent; }
+.wb-mini-syl.bad { border-color: #B4234F; background: #FBE3EA; }
+.wb-mini-syl.good { border-color: #12783F; }
+.wb-count { font-size: .8rem; margin-right: 4px; color: #12783F; }
+.wb-count.off { color: #B4234F; }
+.wb-count-step { text-align: center; padding: 10px 0; }
+.big-chip { font-size: 1.4rem; min-height: 64px; min-width: 80px; }
+.wb-counted { text-align: center; margin: 6px 0 0; }
+.wb-type-row { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; margin: 14px 0; }
+.wb-type { display: grid; justify-items: center; gap: 4px; margin: 0; }
+.wb-type-input { width: 7.5em; font-size: clamp(1.4rem, 4vw, 2rem); font-weight: 700; text-align: center; border: 3px solid var(--ink); border-radius: 10px; padding: .25em .3em; }
+.g-syll .wb-tile { background: #E3F4D2; }
 
 /* game time */
 .game-host { position: fixed; inset: 0; z-index: 90; background: var(--paper); display: flex; flex-direction: column; }
