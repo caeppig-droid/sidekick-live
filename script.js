@@ -456,7 +456,7 @@ const S = {
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
   lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
-  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null
 };
 
 function studentJoin(room, first, initial, token) {
@@ -564,6 +564,7 @@ function onHostMsg(m) {
     case 'pt': showPointer($('#st-stage'), m.x, m.y); break;
     case 'ink': onInkMsg(m); break;
     case 'game': onGameMsg(m); break;
+    case 'bb': onBossMsg(m); break;
     case 'dm': onDotShare(m); break;
     case 'lz': if (S.view && S.view.k === 'slide' && S.reviewIdx == null) showLaser($('#st-stage'), m); break;
     case 'tm': onTimer(m); break;
@@ -571,7 +572,7 @@ function onHostMsg(m) {
     case 'dice': case 'wheel': case 'toolclose': studentTool(m); break;
   }
 }
-function viewQid(v) { return v ? (v.k === 'q' ? v.q.qid : (v.k === 'draw' || v.k === 'dots') ? v.qid : null) : null; }
+function viewQid(v) { return v ? (v.k === 'boss' ? (v.q ? v.q.qid : null) : v.k === 'q' ? v.q.qid : (v.k === 'draw' || v.k === 'dots') ? v.qid : null) : null; }
 function viewMedia(v) { return v ? (v.k === 'slide' ? v.sid : v.k === 'q' ? v.q.img : (v.k === 'draw' || v.k === 'dots') ? v.bg : null) : null; }
 function mediaBox(mid) {
   const u = mediaUrl(mid);
@@ -638,6 +639,7 @@ function renderStudent() {
       case 'draw': stage.append(buildDrawResponse(v)); break;
       case 'dots': stage.append(buildDotMap(v)); break;
       case 'wb': stage.append(buildWordBoard(v)); break;
+      case 'boss': stage.append(buildBossView(v)); break;
       case 'text': {
         const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
         stage.append(card);
@@ -924,6 +926,7 @@ async function startHost(lesson, snap) {
   hostConnectPeer(0);
   H.ticker = makeTicker(250, hostTick);
   const it = currentItem(); if (it && it.kind === 'q') { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
+  H.boss = null;
   H.game = null; $('#game-host-body').replaceChildren(); showGameHost(false); updateGameBar();
   setSignup(H.signup, true); updateHostScore(); updateHostTimer();
   renderHostStage(); renderHostSide(); saveReport(); saveHostSnap();
@@ -1085,6 +1088,7 @@ function resultsFor(it) {
 function viewMsg(st, cache) {
   const base = { t: 'view', paused: H.paused, look: H.look, review: H.review, signup: H.signup, pos: H.pos, total: H.items.length };
   if (H.ended) return { t: 'view', k: 'end' };
+  if (H.boss && H.boss.active) return bossView(base, st);
   if (H.wb && H.wb.active) return wbView(base, st);
   const it = currentItem();
   if (!it) return { ...base, k: 'wait' };
@@ -1113,7 +1117,7 @@ function broadcastView() { const cache = {}; for (const st of H.students.values(
 function liveMsg() {
   const it = currentItem();
   let answered = null;
-  if (H.wb && H.wb.active) answered = null;
+  if ((H.wb && H.wb.active) || (H.boss && H.boss.active)) answered = null;
   else if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) answered = Object.keys(H.report.answers[it.id] || {}).length;
   return { t: 'live', answered, online: onlineStudents().length, stars: H.stars, rx: H.rx };
 }
@@ -1127,6 +1131,7 @@ function ensureReportQuestion(it) {
   H.reportDirty = true;
 }
 function hostAnswer(st, m) {
+  if (H.boss && H.boss.active) { bossAnswer(st, m); return; }
   const it = currentItem();
   if (!it || (it.kind !== 'q' && it.kind !== 'draw' && it.kind !== 'dots') || m.qid !== it.id || (H.phase[it.id] || 'open') !== 'open') return;
   if (it.kind === 'dots') {
@@ -1167,6 +1172,7 @@ function hostTick() {
   pumpSlides(now);
   if (H.timer.total) updateHostTimer();
   dotsTick(now);
+  bossTick(now);
   if (H.wbDirty && now - H.lastWb > 500) { H.lastWb = now; if (H.wb && H.wb.active) renderWbGallery(); else H.wbDirty = false; }
   if (H.galleryDirty && now - H.lastGallery > 1000) { H.lastGallery = now; const it = currentItem(); if (it && it.kind === 'draw') renderGallery(it); else H.galleryDirty = false; }
   if (now - H.lastPing > 5000) {
@@ -1243,6 +1249,7 @@ function sendPart(st, sid, isPrev) {
 function hostGo(pos) {
   if (!H || pos < 0 || pos >= H.items.length) return;
   if (H.wb && H.wb.active) { toast('End the word builder to go back to the lesson.'); return; }
+  if (H.boss && H.boss.active) { toast('End the boss battle to go back to the lesson.'); return; }
   H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null;
   const it = currentItem();
   if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
@@ -1325,6 +1332,11 @@ function renderHostStage() {
   if (!H) return;
   const stage = $('#h-stage'); stage.replaceChildren();
   $('#h-wb').setAttribute('aria-pressed', String(!!(H.wb && H.wb.active)));
+  $('#h-boss').setAttribute('aria-pressed', String(!!(H.boss && H.boss.active)));
+  if (H.boss && H.boss.active) {
+    renderBossStage(stage); $('#h-prev').disabled = true; $('#h-next').disabled = true;
+    $('#h-pos').textContent = 'Boss Battle'; $('#h-notes').textContent = ''; $('#h-next-preview').textContent = 'Back to the lesson when you end the boss battle.'; return;
+  }
   if (H.wb && H.wb.active) {
     renderWbStage(stage); $('#h-prev').disabled = true; $('#h-next').disabled = true;
     $('#h-pos').textContent = 'Word builder'; $('#h-notes').textContent = ''; $('#h-next-preview').textContent = 'Back to the lesson when you end the word builder.'; return;
@@ -1370,7 +1382,7 @@ function renderHostLive(msg) {
   if (!H) return;
   const it = currentItem(), online = msg.online;
   let line = '⭐ ' + H.stars + ' class stars';
-  if (!(H.wb && H.wb.active) && it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) {
+  if (!(H.wb && H.wb.active) && !(H.boss && H.boss.active) && it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) {
     line = 'Answered ' + msg.answered + ' of ' + online + '  ·  ' + line;
     const a = $('#h-answered'); if (a) a.textContent = msg.answered + ' of ' + online + ' answered';
   }
@@ -2482,6 +2494,7 @@ function wbIsCorrect(b, target) { return !!target && b.length === target.length 
 
 /* ---------- teacher ---------- */
 function wbStart() {
+  if (H.boss && H.boss.active) { toast('End the boss battle first.'); return; }
   if (H.wb && H.wb.active) { renderHostStage(); return; }
   const cfg = wbSettings();
   H.wb = { active: true, round: 0, cid: 0, n: 3, target: null, word: '', chain: cfg.chain !== false, hear: cfg.hear !== false, phase: 'build', showAns: false,
@@ -2774,6 +2787,239 @@ function gamesSettings() {
   };
   draw();
   return wrap;
+}
+
+/* =====================================================================
+   21. BOSS BATTLE: the whole class against an (original) monster
+   Every correct answer is one hit. No names are ever shown during the battle.
+   ===================================================================== */
+const BOSSES = {
+  grumble: { name: 'Grumblor', color: '#7B5CD6', dark: '#4E3696', belly: '#B9A6F2' },
+  soggy: { name: 'Sir Soggybottom', color: '#3FA36B', dark: '#23704A', belly: '#9EE0B8' },
+  bolt: { name: 'Bolt-o-Tron', color: '#7D8AA3', dark: '#4C566B', belly: '#C9D2E3' }
+};
+const BOSS_LEVELS = { easy: { label: 'Easy (about half right wins)', pct: 0.5 }, medium: { label: 'Medium (about 2 out of 3 right)', pct: 0.65 }, hard: { label: 'Hard (about 4 out of 5 right)', pct: 0.8 } };
+
+/* Original monster art, drawn in code. mood: ok | hurt | angry | down */
+function bossSVG(id, mood) {
+  const b = BOSSES[id] || BOSSES.grumble;
+  const eyes = mood === 'down'
+    ? '<path d="M68 82l16 16M84 82l-16 16M116 82l16 16M132 82l-16 16" stroke="#1E2B4A" stroke-width="6" stroke-linecap="round"/>'
+    : mood === 'hurt'
+      ? '<path d="M66 90q10-10 20 0M114 90q10-10 20 0" stroke="#1E2B4A" stroke-width="6" fill="none" stroke-linecap="round"/>'
+      : '<circle cx="76" cy="90" r="15" fill="#fff"/><circle cx="124" cy="90" r="15" fill="#fff"/><circle cx="79" cy="93" r="7" fill="#1E2B4A"/><circle cx="121" cy="93" r="7" fill="#1E2B4A"/>';
+  const brows = mood === 'angry' ? '<path d="M58 70l30 10M142 70l-30 10" stroke="#1E2B4A" stroke-width="7" stroke-linecap="round"/>' : '';
+  const mouth = mood === 'down'
+    ? '<path d="M78 136q22-14 44 0" stroke="#1E2B4A" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M104 132q8 18-4 22" fill="#E86A8A"/>'
+    : '<path d="M72 126q28 26 56 0z" fill="#1E2B4A"/><path d="M80 127l6 9 6-9M108 127l6 9 6-9" fill="#fff"/>';
+  let body;
+  if (id === 'bolt') {
+    body = `<rect x="54" y="18" width="8" height="26" fill="${b.dark}"/><circle cx="58" cy="16" r="9" fill="#FFC53D"/>
+      <rect x="138" y="18" width="8" height="26" fill="${b.dark}"/><circle cx="142" cy="16" r="9" fill="#FFC53D"/>
+      <rect x="30" y="40" width="140" height="130" rx="22" fill="${b.color}" stroke="${b.dark}" stroke-width="6"/>
+      <rect x="58" y="148" width="84" height="16" rx="6" fill="${b.belly}"/><circle cx="76" cy="156" r="4" fill="#D62F4B"/><circle cx="100" cy="156" r="4" fill="#FFC53D"/><circle cx="124" cy="156" r="4" fill="#3FA36B"/>
+      <rect x="10" y="90" width="22" height="46" rx="10" fill="${b.dark}"/><rect x="168" y="90" width="22" height="46" rx="10" fill="${b.dark}"/>`;
+  } else if (id === 'soggy') {
+    body = `<path d="M30 120q0-90 70-92q70 2 70 92q0 40-24 50l-6 18-10-16-14 18-12-18-14 18-10-18q-50-8-50-52z" fill="${b.color}" stroke="${b.dark}" stroke-width="6"/>
+      <ellipse cx="100" cy="150" rx="38" ry="18" fill="${b.belly}"/><circle cx="52" cy="58" r="8" fill="${b.belly}"/><circle cx="150" cy="52" r="6" fill="${b.belly}"/>`;
+  } else {
+    body = `<path d="M48 54l-12-40 34 26zM152 54l12-40-34 26z" fill="#FFC53D" stroke="${b.dark}" stroke-width="5"/>
+      <ellipse cx="100" cy="112" rx="76" ry="70" fill="${b.color}" stroke="${b.dark}" stroke-width="6"/>
+      <ellipse cx="100" cy="150" rx="40" ry="24" fill="${b.belly}"/><path d="M26 112q-20 6-14 30M174 112q20 6 14 30" stroke="${b.dark}" stroke-width="10" fill="none" stroke-linecap="round"/>`;
+  }
+  return `<svg viewBox="0 0 200 200" role="img" aria-label="${b.name}">${body}${brows}${eyes}${mouth}</svg>`;
+}
+function bossMood(hp, max, phase) { if (phase === 'won') return 'down'; const f = max ? hp / max : 1; return f < 0.3 ? 'hurt' : f < 0.7 ? 'angry' : 'ok'; }
+function bossArena(v, compact) {
+  const pct = v.maxHp ? Math.max(0, v.hp) / v.maxHp * 100 : 100;
+  const wrap = el('div', { class: 'boss-arena' + (compact ? ' compact' : '') + (v.phase === 'won' ? ' defeated' : '') + (v.phase === 'lost' ? ' escaped' : '') });
+  const mon = el('div', { class: 'boss-monster' }); mon.innerHTML = bossSVG(v.monster, bossMood(v.hp, v.maxHp, v.phase));
+  wrap.append(el('div', { class: 'boss-name' }, (BOSSES[v.monster] || BOSSES.grumble).name), mon,
+    el('div', { class: 'boss-hp', role: 'meter', 'aria-label': 'Boss health', 'aria-valuemin': '0', 'aria-valuemax': String(v.maxHp), 'aria-valuenow': String(Math.max(0, v.hp)) },
+      el('div', { class: 'boss-hp-fill', style: 'width:' + pct + '%' }), el('span', { class: 'boss-hp-text' }, Math.max(0, v.hp) + ' / ' + v.maxHp)));
+  return wrap;
+}
+function bossPop(arena, n) {
+  if (!arena || n <= 0) return;
+  const m = arena.querySelector('.boss-monster'); if (m) { m.classList.remove('shake'); void m.offsetWidth; m.classList.add('shake'); }
+  const p = el('div', { class: 'boss-pop' }, '💥 −' + n); p.style.left = (30 + rand(40)) + '%'; arena.append(p); setTimeout(() => p.remove(), 1200);
+}
+function updateArena(arena, v, prevHp) {
+  if (!arena) return;
+  const pct = v.maxHp ? Math.max(0, v.hp) / v.maxHp * 100 : 100;
+  const f = arena.querySelector('.boss-hp-fill'); if (f) f.style.width = pct + '%';
+  const t = arena.querySelector('.boss-hp-text'); if (t) t.textContent = Math.max(0, v.hp) + ' / ' + v.maxHp;
+  const m = arena.querySelector('.boss-monster'); if (m) m.innerHTML = bossSVG(v.monster, bossMood(v.hp, v.maxHp, v.phase));
+  if (prevHp != null && v.hp < prevHp) bossPop(arena, prevHp - v.hp);
+}
+function confetti(box) {
+  if (reduceMotion() || !box) return;
+  const cols = ['#FFC53D', '#D62F4B', '#1F6FD1', '#3FA36B', '#8A3FD1'];
+  for (let i = 0; i < 40; i++) { const c = el('span', { class: 'confetti' }); c.style.left = rand(100) + '%'; c.style.background = cols[i % 5]; c.style.animationDelay = (rand(800) / 1000) + 's'; box.append(c); setTimeout(() => c.remove(), 3200); }
+}
+
+/* ---------- teacher ---------- */
+function bossSetup() {
+  if (H.wb && H.wb.active) { toast('End the word builder first.'); return; }
+  if (H.boss && H.boss.active) { renderHostStage(); return; }
+  const sets = Sets.all().filter(s => s.questions.length);
+  if (!sets.length) { toast('Import a question set first (Teacher Mode → Question sets).'); return; }
+  openModal((card, close) => {
+    const set = el('select', { 'aria-label': 'Question set' }, sets.map(s => el('option', { value: s.id }, s.name + ' (' + s.questions.length + ')')));
+    const count = el('select', { 'aria-label': 'How many questions' }, [5, 8, 10, 12, 15, 20].map(n => el('option', { value: String(n) }, n + ' questions')));
+    count.value = '10';
+    const secs = el('select', { 'aria-label': 'Time per question' }, [[0, 'No timer'], [20, '20 seconds'], [30, '30 seconds'], [45, '45 seconds'], [60, '1 minute'], [90, '90 seconds']].map(([v, t]) => el('option', { value: String(v) }, t)));
+    secs.value = '30';
+    const lvl = el('select', { 'aria-label': 'Difficulty' }, Object.entries(BOSS_LEVELS).map(([k, l]) => el('option', { value: k }, l.label)));
+    lvl.value = 'medium';
+    let mon = 'grumble';
+    const pick = el('div', { class: 'boss-pick' });
+    const drawPick = () => { pick.replaceChildren(...Object.keys(BOSSES).map(id => { const b = el('button', { class: 'boss-choice', type: 'button', 'aria-pressed': String(id === mon), onclick: () => { mon = id; drawPick(); } }); b.innerHTML = bossSVG(id, 'ok'); b.append(el('span', null, BOSSES[id].name)); return b; })); };
+    drawPick();
+    const charge = el('input', { type: 'checkbox' }); charge.checked = true;
+    const shuf = el('input', { type: 'checkbox' }); shuf.checked = true;
+    card.append(el('h2', null, '👾 Boss Battle'), el('label', null, 'Question set'), set,
+      el('div', { class: 'row-inline' }, count, secs, lvl), el('label', null, 'Choose your boss'), pick,
+      el('label', { class: 'check small' }, shuf, 'Mix up the question order'),
+      el('label', { class: 'check small' }, charge, 'The boss powers up (heals a little) when fewer than half get a question right'),
+      el('p', { class: 'muted' }, 'Boss health is set from how many students are connected when you start.'),
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-sun', onclick: () => { const s = sets.find(x => x.id === set.value); close(); bossStart({ set: s, n: +count.value, secs: +secs.value, level: lvl.value, monster: mon, charge: charge.checked, shuffle: shuf.checked }); } }, '⚔️ Get ready'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
+  });
+}
+function bossStart(o) {
+  const all = o.shuffle ? shuffle(o.set.questions) : o.set.questions.slice();
+  const qs = all.slice(0, Math.min(o.n, all.length)).map(q => JSON.parse(JSON.stringify(q)));
+  const players = Math.max(1, onlineStudents().length);
+  const maxHp = Math.max(3, Math.round(players * qs.length * BOSS_LEVELS[o.level].pct));
+  H.boss = { active: true, opts: o, qs, i: -1, phase: 'intro', monster: o.monster, maxHp, hp: maxHp, answers: {}, pub: null, endAt: null,
+    myHits: {}, qHits: 0, lastBcastHp: maxHp, dirty: false, lastSend: 0, powered: false, round: (H.boss ? H.boss.round : 0) + 1 };
+  H.spotlight = null; broadcast({ t: 'spot', items: null });
+  broadcastView(); renderHostStage();
+}
+function bossQ() { const b = H.boss; return b && b.i >= 0 ? b.qs[b.i] : null; }
+function bossQid() { return 'bb' + H.boss.round + '-' + H.boss.i; }
+function bossNext() {
+  const b = H.boss;
+  if (b.i + 1 >= b.qs.length) { b.phase = b.hp <= 0 ? 'won' : 'lost'; broadcastView(); renderHostStage(); return; }
+  b.i++; b.answers = {}; b.qHits = 0; b.powered = false; b.phase = 'question';
+  b.pub = publicQ(bossQ(), bossQid());
+  b.endAt = b.opts.secs ? performance.now() + b.opts.secs * 1000 : null;
+  broadcastView(); renderHostStage();
+}
+function bossReveal() {
+  const b = H.boss; if (b.phase !== 'question') return;
+  b.phase = 'reveal'; b.endAt = null;
+  const n = Object.keys(b.answers).length, right = b.qHits;
+  if (b.opts.charge && b.hp > 0 && (n === 0 || right / Math.max(n, onlineStudents().length) < 0.5)) {
+    const heal = Math.max(1, Math.round(b.maxHp * 0.05)); b.hp = Math.min(b.maxHp, b.hp + heal); b.powered = heal;
+  }
+  // into the report
+  const q = bossQ(), qid = bossQid();
+  H.report.bossCount = (H.report.bossCount || 0) + 1;
+  H.report.questions.push({ qid, n: 2000 + H.report.bossCount, label: 'B' + H.report.bossCount, type: q.type, text: q.text });
+  H.report.answers[qid] = {};
+  for (const [sid, r] of Object.entries(b.answers)) H.report.answers[qid][sid] = { raw: r.raw, a: answerText(q, r.raw), correct: r.correct, t: r.t };
+  H.reportDirty = true;
+  if (b.hp <= 0) b.phase = 'won';
+  else if (b.i + 1 >= b.qs.length) b.lastQ = true;
+  broadcastView(); renderHostStage();
+}
+function bossAnswer(st, m) {
+  const b = H.boss, q = bossQ();
+  if (b.phase !== 'question' || !q || m.qid !== bossQid() || b.answers[st.id]) return;   // one answer each
+  const a = sanitizeAnswer(q, m.a); if (a == null) return;
+  const correct = grade(q, a);
+  b.answers[st.id] = { raw: a, correct, t: Date.now() };
+  if (correct) { b.qHits++; b.hp--; b.myHits[st.id] = (b.myHits[st.id] || 0) + 1; }
+  b.dirty = true;
+  send(st, { t: 'ack', qid: m.qid }); send(st, viewMsg(st));
+  if (Object.keys(b.answers).length >= onlineStudents().length) setTimeout(() => { if (H && H.boss && H.boss.phase === 'question') bossReveal(); }, 700);
+}
+function bossTick(now) {
+  const b = H.boss; if (!b || !b.active) return;
+  if (b.phase === 'question' && b.endAt && now >= b.endAt) { bossReveal(); return; }
+  if (b.dirty && now - b.lastSend > 400) {
+    b.dirty = false; b.lastSend = now;
+    broadcast({ t: 'bb', hp: b.hp, maxHp: b.maxHp, answered: Object.keys(b.answers).length });
+    const arena = $('#h-stage .boss-arena'); updateArena(arena, bossPublic(), b.lastBcastHp); b.lastBcastHp = b.hp;
+    const c = $('#boss-answered'); if (c) c.textContent = Object.keys(b.answers).length + ' of ' + onlineStudents().length + ' answered';
+  }
+  const t = $('#boss-timer'); if (t && b.endAt) t.textContent = '⏱ ' + fmtTime(b.endAt - now);
+}
+function bossPublic() { const b = H.boss; return { monster: b.monster, hp: b.hp, maxHp: b.maxHp, phase: b.phase }; }
+function bossView(base, st) {
+  const b = H.boss, mine = b.answers[st.id];
+  const v = { ...base, k: 'boss', ...bossPublic(), i: b.i, n: b.qs.length, round: b.round, myHits: b.myHits[st.id] || 0, powered: b.powered || 0, last: !!b.lastQ };
+  if (b.phase === 'question' || b.phase === 'reveal') { v.q = b.pub; v.mine = mine ? mine.raw : null; }
+  if (b.phase === 'question' && b.endAt) v.left = Math.max(0, Math.round(b.endAt - performance.now()));
+  if (b.phase === 'reveal' || ((b.phase === 'won' || b.phase === 'lost') && b.i >= 0)) {
+    v.qHits = b.qHits; v.classN = Object.keys(b.answers).length;
+    v.my = { answered: !!mine, correct: !!(mine && mine.correct), answer: correctText(bossQ()) };
+  }
+  return v;
+}
+function bossEnd() { H.boss.active = false; broadcastView(); renderHostStage(); renderHostSide(); }
+function renderBossStage(stage) {
+  const b = H.boss, v = bossPublic(), q = bossQ();
+  const arena = bossArena(v, false); stage.append(arena); b.lastBcastHp = b.hp;
+  const panel = el('div', { class: 'q-card boss-panel' });
+  const btn = (label, fn, cls) => el('button', { class: 'btn ' + (cls || ''), onclick: fn }, label);
+  if (b.phase === 'intro') {
+    panel.append(el('div', { class: 'q-text' }, (BOSSES[b.monster] || {}).name + ' appears! ' + b.qs.length + ' questions to defeat it.'),
+      el('div', { class: 'spin-buttons' }, btn('⚔️ Start the battle', bossNext, 'btn-sun'), btn('End boss battle', bossEnd, 'btn-ghost')));
+  } else if (b.phase === 'question') {
+    panel.append(el('div', { class: 'tag' }, 'Question ' + (b.i + 1) + ' of ' + b.qs.length + ' · ' + TYPE_LABEL[q.type]), el('div', { class: 'q-text', text: q.text }),
+      el('div', { class: 'host-q-meta' }, el('span', { class: 'count-pill', id: 'boss-answered' }, Object.keys(b.answers).length + ' of ' + onlineStudents().length + ' answered'),
+        b.endAt ? el('span', { class: 'timer-pill', id: 'boss-timer' }, '') : null,
+        btn('Show the answer now', bossReveal), btn('End boss battle', bossEnd, 'btn-ghost')));
+  } else if (b.phase === 'reveal') {
+    const n = Object.keys(b.answers).length;
+    panel.append(el('div', { class: 'tag' }, 'Question ' + (b.i + 1) + ' of ' + b.qs.length), el('div', { class: 'q-text', text: q.text }),
+      el('p', null, el('strong', null, 'Answer: '), correctText(q)),
+      el('p', { class: 'boss-result' }, '💥 ' + b.qHits + ' hit' + (b.qHits === 1 ? '' : 's') + ' (' + (n ? Math.round(100 * b.qHits / n) : 0) + '% of answers)' + (b.powered ? '  ·  ⚡ The boss powered up +' + b.powered : '')),
+      el('div', { class: 'spin-buttons' }, btn(b.lastQ ? 'See how it ends' : 'Next question ▶', bossNext, 'btn-primary'), btn('End boss battle', bossEnd, 'btn-ghost')));
+  } else {
+    const won = b.phase === 'won';
+    panel.append(el('div', { class: 'q-text' }, won ? '🏆 Victory! The class defeated ' + (BOSSES[b.monster] || {}).name + '!' : '💨 ' + (BOSSES[b.monster] || {}).name + ' escaped this time…'),
+      el('div', { class: 'spin-buttons' }, btn('🔁 Play again', () => bossStart(b.opts), 'btn-sun'), btn('End boss battle', bossEnd, 'btn-primary')));
+    if (won) setTimeout(() => confetti($('#h-stage .boss-arena')), 50);
+  }
+  stage.append(panel);
+}
+
+/* ---------- student ---------- */
+function buildBossView(v) {
+  const box = el('div', { class: 'boss-student' });
+  const arena = bossArena(v, true); box.append(arena);
+  S.bossHp = v.hp;
+  if (v.phase === 'intro') box.append(msgCard('👾', 'A boss appears!', 'Get ready. Every right answer is a hit. Work together to win!'));
+  else if (v.phase === 'question') {
+    const card = buildStudentQ({ ...v, k: 'q', phase: v.mine != null ? 'closed' : 'open', mine: v.mine });
+    const top = el('div', { class: 'boss-qtop' }, el('span', { class: 'tag' }, 'Question ' + (v.i + 1) + ' of ' + v.n), v.left != null ? el('span', { class: 'timer-pill', id: 'boss-st-timer' }, '⏱ ' + fmtTime(v.left)) : null);
+    card.prepend(top);
+    if (v.mine != null) { const p = [...card.querySelectorAll('p.muted')].pop(); if (p) p.textContent = 'Locked in! ⚔️ Watch the boss…'; }
+    box.append(card);
+    clearInterval(S.bossTimerT);
+    if (v.left != null) { const end = Date.now() + v.left; S.bossTimerT = setInterval(() => { const t = $('#boss-st-timer'); if (!t) { clearInterval(S.bossTimerT); return; } t.textContent = '⏱ ' + fmtTime(end - Date.now()); }, 250); }
+  } else if (v.phase === 'reveal') {
+    const my = v.my || {};
+    box.append(el('div', { class: 'q-card' },
+      el('div', { class: 'result-mine big' }, my.correct ? '✓ Hit! You damaged the boss.' : my.answered ? 'Missed this time. The answer: ' + my.answer : 'No answer this time. The answer: ' + my.answer),
+      el('p', { class: 'boss-result' }, '💥 The class landed ' + v.qHits + ' hit' + (v.qHits === 1 ? '' : 's') + '!' + (v.powered ? '  ⚡ The boss powered up!' : '')),
+      el('p', { class: 'muted' }, 'Your hits so far: ' + v.myHits + (v.last ? '' : '  ·  Waiting for the next question…'))));
+  } else {
+    const won = v.phase === 'won';
+    box.append(msgCard(won ? '🏆' : '💨', won ? 'Victory! The class defeated the boss!' : 'The boss escaped this time…', 'You landed ' + v.myHits + ' hit' + (v.myHits === 1 ? '' : 's') + '. ' + (won ? 'Great teamwork!' : 'Let’s get it next time!')));
+    if (won) setTimeout(() => confetti(arena), 50);
+  }
+  return box;
+}
+function onBossMsg(m) {
+  if (!S.view || S.view.k !== 'boss') return;
+  const prev = S.bossHp; S.view.hp = m.hp; S.view.maxHp = m.maxHp; S.bossHp = m.hp;
+  updateArena($('#st-stage .boss-arena'), S.view, prev);
 }
 
 /* =====================================================================
@@ -3262,6 +3508,7 @@ function init() {
   $('#h-tools').addEventListener('click', () => openTools());
   $('#h-wb').addEventListener('click', () => wbStart());
   $('#h-gametime').addEventListener('click', openGameLauncher);
+  $('#h-boss').addEventListener('click', bossSetup);
   $('#h-game').addEventListener('click', () => showGameHost(true));
   $('#game-host-back').addEventListener('click', () => showGameHost(false));
   $('#game-host-end').addEventListener('click', endGame);
