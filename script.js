@@ -456,7 +456,7 @@ const S = {
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
   lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
-  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0
 };
 
 function studentJoin(room, first, initial, token) {
@@ -469,7 +469,10 @@ function studentJoin(room, first, initial, token) {
   S.firstTimer = setTimeout(() => { if (!S.everConnected) renderStudent(); }, 20000);
   clientPeer();
 }
-function setConn(state, text) { const p = $('#st-conn'); p.dataset.state = state; p.textContent = text; }
+function setConn(state, text) {
+  const p = $('#st-conn'); p.dataset.state = state; p.textContent = text;
+  if (state === 'ok') S.lostAt = 0; else if (S.everConnected && !S.lostAt) S.lostAt = Date.now();
+}
 function failJoin(msg) {
   S.leaving = true; S.active = false; clearTimeout(S.rtimer); S.rtimer = null;
   try { S.peer && S.peer.destroy(); } catch { /* ignore */ }
@@ -510,7 +513,7 @@ function connectHost() {
   const to = setTimeout(() => { if (!c.open) { S.connecting = false; try { c.close(); } catch { /* ignore */ } if (S.conn === c) S.conn = null; scheduleReconnect(); } }, 12000);
   c.on('open', () => {
     clearTimeout(to); S.connecting = false;
-    c.send({ t: 'hello', v: 1, token: S.token, first: S.first, initial: S.initial, have: completeSids() });
+    c.send({ t: 'hello', v: 1, token: S.token, first: S.first, initial: S.initial, have: completeSids(), demo: S.demo ? 1 : 0 });
   });
   c.on('data', m => { try { onHostMsg(m); } catch (err) { console.error(err); } });
   c.on('close', () => {
@@ -615,8 +618,7 @@ function renderStudent() {
   $('#st-vol').hidden = !(v && v.signup && v.k !== 'end');
   if (!v) {
     if (!S.everConnected && S.firstTimer && performanceWaitedLong()) {
-      stage.append(msgCard('📡', 'Still trying to reach your class',
-        'Your internet may be blocking the connection. Keep this page open — it keeps trying. You can still join in on LL (LiveLesson): use reactions and raise your hand, and your teacher can add you to the share spinner.'));
+      stage.append(helpCard({ retry: true }));
     } else stage.append(msgCard('⏳', 'Joining your class…', 'Hang on a moment.'));
     return;
   }
@@ -1016,7 +1018,7 @@ function send(st, msg) {
 }
 function sendConn(conn, msg) { try { conn.send(msg); } catch { /* ignore */ } }
 function broadcast(msg) { for (const st of H.students.values()) if (st.online) send(st, msg); }
-function onlineStudents() { return [...H.students.values()].filter(s => s.online); }
+function onlineStudents() { return [...H.students.values()].filter(s => s.online && !s.demo); }   // the demo student never counts
 function makeName(first, initial) {
   let f = cleanText(first, 20).replace(/[^\p{L}\p{M}' -]/gu, '').replace(/\s+/g, ' ').trim();
   const i = cleanText(initial, 4).replace(/[^\p{L}]/gu, '').slice(0, 1).toUpperCase();
@@ -1054,7 +1056,8 @@ function hostHello(conn, m) {
       H.students.set(st.id, st); H.byToken.set(st.token, st);
     }
   }
-  if (!H.report.students[st.id]) H.report.students[st.id] = { name: st.name, shared: st.shared };
+  st.demo = !!m.demo;
+  if (!st.demo && !H.report.students[st.id]) H.report.students[st.id] = { name: st.name, shared: st.shared };
   if (st.conn && st.conn !== conn) { const old = st.conn; old._sk.st = null; try { old.close(); } catch { /* ignore */ } }
   st.conn = conn; conn._sk.st = st; conn._sk.hello = true;
   st.online = true; st.lastSeen = Date.now(); st.hidden = false; st.quiet = false;
@@ -1075,7 +1078,7 @@ function hostHello(conn, m) {
 function currentItem() { return H.items[H.pos] || null; }
 function getPub(it) { if (!H.pub[it.id]) H.pub[it.id] = { ...publicQ(it.q, it.id), img: mediaIdFor(it) }; return H.pub[it.id]; }
 function resultsFor(it) {
-  const ans = H.report.answers[it.id] || {}; const recs = Object.values(ans);
+  const ans = H.report.answers[it.id] || {}; const recs = Object.entries(ans).filter(([sid]) => !isDemoId(sid)).map(([, r]) => r);
   const n = recs.length, correct = recs.filter(r => r.correct).length;
   const res = { n, pct: n ? Math.round(100 * correct / n) : 0 };
   if (it.q.type === 'mc' || it.q.type === 'tf') {
@@ -1118,7 +1121,7 @@ function liveMsg() {
   const it = currentItem();
   let answered = null;
   if ((H.wb && H.wb.active) || (H.boss && H.boss.active)) answered = null;
-  else if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) answered = Object.keys(H.report.answers[it.id] || {}).length;
+  else if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) answered = Object.keys(H.report.answers[it.id] || {}).filter(sid => !isDemoId(sid)).length;
   return { t: 'live', answered, online: onlineStudents().length, stars: H.stars, rx: H.rx };
 }
 
@@ -1148,7 +1151,7 @@ function hostAnswer(st, m) {
   ensureReportQuestion(it);
   send(st, { t: 'ack', qid: it.id });
   H.liveDirty = true; H.reportDirty = true;
-  const online = onlineStudents().length, answered = Object.keys(H.report.answers[it.id]).length;
+  const online = onlineStudents().length, answered = Object.keys(H.report.answers[it.id]).filter(sid => !isDemoId(sid)).length;
   if (online > 0 && !H.goalHit.has(it.id) && answered / online >= GOAL_PCT) {
     H.goalHit.add(it.id); H.stars++; broadcast({ t: 'star', stars: H.stars }); toast('The class earned a star! ⭐'); awardStarPoint(); saveHostSnap();
   }
@@ -1283,7 +1286,7 @@ function saveHostSnap() {
 }
 function saveReport() {
   if (!H) return;
-  for (const st of H.students.values()) H.report.students[st.id] = { name: st.name, shared: st.shared };
+  for (const st of H.students.values()) if (!st.demo) H.report.students[st.id] = { name: st.name, shared: st.shared };
   H.report.manual = H.manual.map(m => ({ name: m.name, shared: m.shared }));
   H.reportDirty = false; lsSet(KEYS.report, H.report);
 }
@@ -1398,7 +1401,7 @@ function renderHostLive(msg) {
 }
 function renderHostSide() {
   if (!H) return;
-  const all = [...H.students.values()], on = all.filter(s => s.online);
+  const all = [...H.students.values()], on = all.filter(s => s.online && !s.demo);
   const inClass = on.filter(s => s.hidden).length;
   $('#h-count').textContent = on.length + (on.length === 1 ? ' student' : ' students') + (inClass ? ' (' + inClass + ' in LL)' : '');
   if (H.sids.length) {
@@ -1413,7 +1416,7 @@ function renderHostSide() {
     if (!s.online) { dot += ' off'; status = 'left'; }
     else if (s.hidden) { dot += ' away'; status = '🎤 in LL'; }
     else if (s.quiet) { dot += ' away'; status = 'no signal'; }
-    ul.append(el('li', null, el('span', { class: dot }), el('span', { class: 'rname', text: s.name }),
+    ul.append(el('li', null, el('span', { class: dot }), el('span', { class: 'rname', text: s.name + (s.demo ? ' (demo)' : '') }),
       s.vol && s.online ? el('span', { title: 'Wants to share' }, '✋') : null,
       s.shared ? el('span', { class: 'muted', title: 'Times shared' }, '🎤' + s.shared) : null,
       status ? el('span', { class: 'muted' }, status) : null));
@@ -1713,7 +1716,7 @@ function toolWheel(body) {
     el('button', { class: 'btn btn-ghost', onclick: () => { H.toolShowing = true; hideToolFromClass(); toast('Hidden from student screens.'); } }, 'Hide from class')), vis, res);
 }
 function wheelItems(listId) {
-  if (listId === '__class') return [...H.students.values()].filter(s => s.online).map(s => s.name).sort(naturalSort);
+  if (listId === '__class') return [...H.students.values()].filter(s => s.online && !s.demo).map(s => s.name).sort(naturalSort);
   const l = Wheels.all().find(x => x.id === listId); return l ? l.items.slice() : [];
 }
 function spinWheel(vis, res) {
@@ -2143,7 +2146,7 @@ function onDotShare(m) {
 
 /* ---------- teacher ---------- */
 function dotState(it) { return (H.dotState[it.id] ||= { share: false, pct: false, reveal: false, showZones: it.showZones !== false }); }
-function dotPts(it) { return Object.values(H.report.answers[it.id] || {}).map(r => [r.raw.x, r.raw.y]); }
+function dotPts(it) { return Object.entries(H.report.answers[it.id] || {}).filter(([sid]) => !isDemoId(sid)).map(([, r]) => [r.raw.x, r.raw.y]); }
 function dotShareData(it) {
   const ds = dotState(it), pts = dotPts(it);
   return { pts, counts: ds.pct ? dotCounts(it.zones || [], pts) : null };
@@ -3023,6 +3026,92 @@ function onBossMsg(m) {
 }
 
 /* =====================================================================
+   22. DEMO STUDENT WINDOW ("Pip D.")
+   A second window that joins as a pretend student, with the join address and room code
+   shown big at the top, so the teacher can share just that window. Pip never counts.
+   ===================================================================== */
+const DEMO_FIRST = 'Pip', DEMO_INITIAL = 'D';
+function openDemoStudent() {
+  const u = new URL(joinURL());
+  u.searchParams.set('room', H.code); u.searchParams.set('demo', '1');
+  const ps = QS.get('peerserver'); if (ps) u.searchParams.set('peerserver', ps);
+  // "noopener": the demo window starts fresh and never gets a copy of the teacher's session
+  window.open(u.href, '_blank', 'popup,width=1100,height=820,noopener');
+  toast('Demo student window opening… Share just that window in LL. (No window? Allow pop-ups for this site.)');
+}
+function isDemoId(sid) { const s = H && H.students.get(sid); return !!(s && s.demo); }
+function startDemoStudent(room) {
+  // a new window can inherit a copy of the teacher's session; this window is only ever the demo student
+  ssDel(KEYS.host); ssDel(KEYS.teacherOk); ssDel(KEYS.student);
+  S.demo = true; document.body.classList.add('demo-mode');
+  document.title = 'Sidekick Live · Student view (demo)';
+  const site = (location.origin + location.pathname).replace(/^https?:\/\//, '').replace(/\/index\.html$/, '/');
+  const bar = el('div', { class: 'demo-banner', role: 'note' },
+    el('div', null, el('span', { class: 'demo-label' }, 'Go to'), el('strong', { class: 'demo-url' }, site)),
+    el('div', null, el('span', { class: 'demo-label' }, 'Room code'), el('strong', { class: 'demo-code' }, room)),
+    el('div', { class: 'demo-pip' }, '⭐ Pip is our demo student'));
+  $('#screen-student').prepend(bar);
+  studentJoin(room, DEMO_FIRST, DEMO_INITIAL, null);
+}
+
+/* =====================================================================
+   23. CONNECTION HELP (on screen + downloadable)
+   ===================================================================== */
+const HELP_STEPS = [
+  ['Check the room code', 'Ask your teacher for today’s 4-letter code. Codes never use O, 0, I, 1, L, S, 5, Z, 2, B or 8.'],
+  ['Refresh the page', 'Press Ctrl + R (or the ⟳ button). On a tablet, pull the page down. You keep your spot in class.'],
+  ['Use Chrome, Edge or Safari', 'Sidekick Live works best in an up-to-date Chrome or Edge. On an iPad, use Safari. Restart the browser if it asks to update.'],
+  ['Get a stronger connection', 'Move closer to your Wi-Fi router, and close other tabs, videos or games that use the internet.'],
+  ['Turn off VPNs and blockers', 'VPNs, ad blockers and some “privacy” extensions can block live connections. Turn them off for this site, then refresh.'],
+  ['Try a different network', 'If you can, switch to another Wi-Fi network or a phone hotspot. Some home or school filters block live classroom tools.'],
+  ['Restart the device', 'Turn the computer or tablet off and on again, then open the page and join with the code.'],
+  ['School-issued device?', 'Its filter may block Sidekick Live. Tell your teacher so they can ask tech support to allow it.']
+];
+function connectionDiagnosis() {
+  const out = [];
+  if (navigator.onLine === false) out.push('This device looks offline. Check the Wi-Fi first.');
+  if (typeof Peer === 'undefined') out.push('Sidekick Live’s connection tool couldn’t load. This network may be blocking it: try another network, or ask your teacher.');
+  if (typeof RTCPeerConnection === 'undefined') out.push('This browser can’t make live connections. Try an up-to-date Chrome, Edge or Safari.');
+  return out;
+}
+function helpCard(opts = {}) {
+  const diag = connectionDiagnosis();
+  const card = el('div', { class: 'help-card' },
+    el('h2', null, '📡 Can’t connect? Try these steps'),
+    diag.length ? el('div', { class: 'help-diag', role: 'alert' }, diag.map(d => el('p', null, '⚠️ ' + d))) : null,
+    el('ol', { class: 'help-steps' }, HELP_STEPS.map(([t, d]) => el('li', null, el('strong', null, t + (t.endsWith('?') ? ' ' : '. ')), d))),
+    el('div', { class: 'spin-buttons' },
+      opts.retry ? el('button', { class: 'btn btn-primary', onclick: () => { S.joinStart = Date.now(); reconnectNow(); renderStudent(); toast('Trying again…'); } }, '⟳ Try again now') : null,
+      el('button', { class: 'btn', onclick: () => downloadHelp(opts.room || S.room) }, '⬇ Download these steps'),
+      opts.close ? el('button', { class: 'btn btn-ghost', onclick: opts.close }, 'Close') : null),
+    el('div', { class: 'help-ll' }, el('strong', null, '📺 Still not working? Watch in LL.'),
+      el('p', null, 'Stay in LiveLesson and follow along with your teacher’s screen. Answer out loud or in the LL chat, use reactions, and raise your hand. Your teacher can add you to the share spinner.')));
+  return card;
+}
+function helpHTML(room) {
+  const site = (location.origin + location.pathname).replace(/\/index\.html$/, '/');
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sidekick Live: connection help</title><style>body{font-family:system-ui,Arial,sans-serif;max-width:720px;margin:30px auto;color:#1E2B4A;line-height:1.5;padding:0 16px}h1{font-size:1.6rem}li{margin:8px 0}.box{border:2px solid #1E2B4A;border-radius:12px;padding:12px 16px;margin:16px 0}@media print{.noprint{display:none}}</style></head><body>' +
+    '<h1>Sidekick Live: can’t connect?</h1><div class="box"><strong>Website:</strong> ' + escapeHTML(site) + (room ? '<br><strong>Room code:</strong> ' + escapeHTML(room) + ' (the code changes each class; use the one your teacher shows)' : '<br><strong>Room code:</strong> your teacher shows a new 4-letter code each class') + '</div>' +
+    '<h2>Try these steps in order</h2><ol>' + HELP_STEPS.map(([t, d]) => '<li><strong>' + escapeHTML(t) + (t.endsWith('?') ? '' : '.') + '</strong> ' + escapeHTML(d) + '</li>').join('') + '</ol>' +
+    '<div class="box"><strong>Still not working? Watch in LL.</strong><br>Stay in LiveLesson and follow along with your teacher’s screen. Answer out loud or in the LL chat, use reactions, and raise your hand. Your teacher can add you to the share spinner.</div>' +
+    '<p class="noprint"><button onclick="print()">🖨 Print this page</button></p></body></html>';
+}
+function downloadHelp(room) { download('Sidekick-Live-connection-help.html', helpHTML(room), 'text/html;charset=utf-8'); }
+function openHelpModal() { openModal((card, close) => card.append(helpCard({ close: () => close() }))); }
+
+/* lost connection during class: offer help after 30 seconds */
+setInterval(() => {
+  const bar = $('#st-help'); if (!bar) return;
+  const stuck = S.active && !S.leaving && S.everConnected && !(S.conn && S.conn.open) && S.lostAt && Date.now() - S.lostAt > 30000;
+  if (stuck && bar.hidden) {
+    bar.replaceChildren(el('span', null, '📡 Still reconnecting…'),
+      el('button', { class: 'btn btn-small', onclick: () => { S.lostAt = Date.now(); reconnectNow(); } }, '⟳ Try again'),
+      el('button', { class: 'btn btn-small', onclick: openHelpModal }, 'What to try'));
+    bar.hidden = false;
+  } else if (!stuck && !bar.hidden) bar.hidden = true;
+}, 3000);
+
+/* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
    ===================================================================== */
 function openTeacher() {
@@ -3281,7 +3370,9 @@ function renderSettings() {
     el('label', { for: 'set-rate' }, 'Slide sending speed'), rate,
     el('p', { class: 'muted' }, 'How fast slides travel from your computer to students before and during class. “Normal” uses about 3 Mbps of your upload and leaves room for Class video.'),
     el('label', { for: 'set-mode' }, 'Share spinner default'), mode,
-    el('p', { class: 'muted' }, 'The Teacher PIN is set in script.js. Lessons, question sets and reports are saved only in this browser on this device.')), gamesSettings());
+    el('p', { class: 'muted' }, 'The Teacher PIN is set in script.js. Lessons, question sets and reports are saved only in this browser on this device.')), gamesSettings(),
+    el('div', { class: 'q-card' }, el('h3', null, '📄 Family help sheet'), el('p', { class: 'muted' }, 'Steps for students and Learning Coaches when Sidekick Live won’t connect, ending with “watch in LL.” Send it to families before class or post it on your class page.'),
+      el('button', { class: 'btn', onclick: () => downloadHelp('') }, '⬇ Download the help sheet')));
 }
 
 /* =====================================================================
@@ -3525,7 +3616,7 @@ function init() {
     const link = joinURL() + '?room=' + H.code;
     (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('Join link copied — paste it in the LL chat.'), () => toast(link));
   } }, 'Copy join link');
-  $('.join-info').append(' ', copyBtn);
+  $('.join-info').append(' ', copyBtn, ' ', el('button', { class: 'btn btn-small', title: 'Open a pretend student in its own window to share in LL', onclick: openDemoStudent }, '🧸 Demo student'));
 
   // Spinner overlay (teacher)
   $('#spin-go').addEventListener('click', doSpin);
@@ -3548,12 +3639,14 @@ function init() {
 
   // Where do we start?
   const room = QS.get('room'); if (room) code.value = room.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+  if (QS.get('demo') === '1' && /^[A-Z0-9]{4}$/i.test(QS.get('room') || '')) { startDemoStudent(QS.get('room').toUpperCase()); return; }
   const saved = ssGet(KEYS.student, null);
   if (saved && saved.room && saved.first) { studentJoin(saved.room, saved.first, saved.initial, saved.token); return; }
   const snap = ssGet(KEYS.host, null);
   if (snap && ssGet(KEYS.teacherOk, false)) { resumeHost(snap); return; }
   show('screen-join');
-  if (typeof Peer === 'undefined') $('#join-error').textContent = 'Sidekick Live couldn’t load. Check your internet and refresh.';
+  if (typeof Peer === 'undefined') { $('#join-error').textContent = 'Sidekick Live couldn’t load its connection tool. '; $('#join-error').append(el('button', { class: 'btn btn-small', type: 'button', onclick: openHelpModal }, 'What to try')); }
+  $('#join-help').addEventListener('click', openHelpModal);
 }
 
 // For automated tests only: read-only peek at state.

@@ -270,6 +270,23 @@ body.safe .sname-list { filter: blur(6px); }
 .boss-choice[aria-pressed="true"] { border-color: var(--ink); background: #FFF4D6; }
 .tool-boss { background: #EFE7FF; }
 
+/* demo student window */
+.demo-banner { display: flex; flex-wrap: wrap; gap: 8px 36px; align-items: center; justify-content: center; padding: 14px 18px; background: var(--ink); color: #fff; }
+.demo-label { display: block; font-size: .85rem; font-weight: 600; opacity: .8; }
+.demo-url { font-size: clamp(1.3rem, 3vw, 2rem); font-weight: 800; }
+.demo-code { font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 800; letter-spacing: .18em; background: var(--sun); color: var(--ink); padding: 0 .35em; border-radius: 12px; }
+.demo-pip { font-weight: 700; opacity: .9; }
+/* connection help */
+.help-card { background: var(--card); border: 2px solid var(--line); border-radius: var(--radius-lg); padding: 18px 22px; max-width: 46em; width: 100%; }
+.help-card h2 { font-size: 1.3rem; }
+.help-diag { background: #FFF2D0; border: 2px solid var(--sun-deep); border-radius: var(--radius); padding: 6px 12px; margin-bottom: 8px; }
+.help-diag p { margin: 6px 0; font-weight: 600; }
+.help-steps { padding-left: 1.4em; } .help-steps li { margin: 6px 0; }
+.help-ll { margin-top: 12px; background: #E3F3F1; border-radius: var(--radius); padding: 10px 14px; }
+.help-ll p { margin: 4px 0 0; }
+.st-help { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; padding: 8px; background: #FFF2D0; border-bottom: 2px solid var(--sun-deep); font-weight: 700; }
+.join-help-line { text-align: center; margin: 8px 0 0; }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }
