@@ -461,7 +461,7 @@ const S = {
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
   lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
-  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0, racePrev: null, raceTimerT: null
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0, racePrev: null, raceTimerT: null, handouts: []
 };
 
 function studentJoin(room, first, initial, token) {
@@ -549,6 +549,7 @@ function onHostMsg(m) {
       ssSet(KEYS.student, { room: S.room, first: S.first, initial: S.initial, token: S.token });
       setConn('ok', 'Connected'); $('#st-name').textContent = m.name; renderVol(); renderStars(false);
       $('#spin-overlay').hidden = true; $('#tool-overlay').hidden = true;
+      if (Array.isArray(m.handouts)) { S.handouts = m.handouts.filter(h => h && h.hid); renderHandoutBtn(); }
       if (S.pendingAns) { sendHost(S.pendingAns); }
       break;
     case 'reject':
@@ -581,7 +582,7 @@ function onHostMsg(m) {
   }
 }
 function viewQid(v) { return v ? ((v.k === 'boss' || v.k === 'race') ? (v.q ? v.q.qid : null) : v.k === 'q' ? v.q.qid : (v.k === 'draw' || v.k === 'dots') ? v.qid : null) : null; }
-function viewMedia(v) { return v ? (v.k === 'slide' ? v.sid : v.k === 'q' ? v.q.img : (v.k === 'draw' || v.k === 'dots') ? v.bg : null) : null; }
+function viewMedia(v) { return v ? (v.k === 'slide' ? v.sid : v.k === 'q' ? v.q.img : (v.k === 'draw' || v.k === 'dots') ? v.bg : v.k === 'handout' ? v.h && v.h.mid : null) : null; }
 function mediaBox(mid) {
   const u = mediaUrl(mid);
   return el('div', { class: 'q-img', 'data-mid': mid }, u ? el('img', { src: u, alt: 'Question picture' }) : el('div', { class: 'slide-loading' }, 'Loading picture…'));
@@ -648,6 +649,7 @@ function renderStudent() {
       case 'dots': stage.append(buildDotMap(v)); break;
       case 'wb': stage.append(buildWordBoard(v)); break;
       case 'boss': stage.append(buildBossView(v)); break;
+      case 'handout': stage.append(buildHandoutView(v)); break;
       case 'race': stage.append(buildRaceView(v)); break;
       case 'text': {
         const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
@@ -913,7 +915,8 @@ async function startHost(lesson, snap) {
     mediaIds: [], imgCache: {}, galleryDirty: false, lastGallery: 0,
     dotState: snap && snap.dotState ? snap.dotState : {}, dotsDirty: false, lastDots: 0, dotPaint: null,
     wb: snap && snap.wb ? snap.wb : null, wbDirty: false, lastWb: 0,
-    spos: snap ? (snap.spos != null ? snap.spos : snap.pos) : -1, launched: new Set(snap && snap.launched ? snap.launched : []), spinPrompt: null
+    spos: snap ? (snap.spos != null ? snap.spos : snap.pos) : -1, launched: new Set(snap && snap.launched ? snap.launched : []), spinPrompt: null,
+    handoutsShown: new Set(snap && snap.handouts ? snap.handouts : []), handoutGot: {}
   };
   H.report = snap ? (lsGet(KEYS.report, null) || newReport(lesson, H.code)) : newReport(lesson, H.code);
   H.report.lessonId = lesson.id;
@@ -955,9 +958,10 @@ function mediaIdFor(it) {
   if (it.kind === 'q') return it.img ? 'qi-' + it.id : null;
   if (it.kind === 'draw') return it.bg ? 'db-' + it.id : null;
   if (it.kind === 'dots') return it.bg ? 'dm-' + it.id : null;
+  if (it.kind === 'handout') return it.file ? 'ho-' + it.id : null;
   return null;
 }
-function mediaBlob(it) { return it.kind === 'slide' ? it.blob : it.kind === 'q' ? it.img : (it.kind === 'draw' || it.kind === 'dots') ? it.bg : null; }
+function mediaBlob(it) { return it.kind === 'slide' ? it.blob : it.kind === 'q' ? it.img : (it.kind === 'draw' || it.kind === 'dots') ? it.bg : it.kind === 'handout' ? it.file : null; }
 function setSignup(on, quiet) {
   if (!H) return;
   H.signup = !!on;
@@ -1056,6 +1060,7 @@ function hostOnData(conn, m) {
     case 'rx': hostReaction(st, m.e); break;
     case 'wbb': wbBoardMsg(st, m); break;
     case 'wbc': wbCountMsg(st, m); break;
+    case 'hog': handoutGotMsg(st, m); break;
   }
 }
 function hostHello(conn, m) {
@@ -1080,7 +1085,7 @@ function hostHello(conn, m) {
   st.online = true; st.lastSeen = Date.now(); st.hidden = false; st.quiet = false;
   st.have = new Set((Array.isArray(m.have) ? m.have : []).filter(x => H.slideData.has(x)));
   st.sent = new Map(); st.havePrev = new Set(); st.sentPrev = new Map();
-  send(st, { t: 'welcome', id: st.id, token: st.token, name: st.name, deck: H.sids, vol: st.vol, stars: H.stars });
+  send(st, { t: 'welcome', id: st.id, token: st.token, name: st.name, deck: H.sids, vol: st.vol, stars: H.stars, handouts: handoutList() });
   send(st, viewMsg(st));
   send(st, liveMsg());
   if (H.spotlight) send(st, { t: 'spot', items: H.spotlight });
@@ -1116,6 +1121,7 @@ function viewMsg(st, cache) {
   switch (it.kind) {
     case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '', ink: H.ink[it.id] || [] };
     case 'dots': return dotsViewMsg(base, it, st);
+    case 'handout': return { ...base, k: 'handout', h: handoutInfo(it) };
     case 'draw': {
       const rec = (H.report.answers[it.id] || {})[st.id];
       return { ...base, k: 'draw', qid: it.id, prompt: it.prompt || '', read: it.read || '', bg: mediaIdFor(it), aspect: drawAspect(it), phase: H.phase[it.id] || 'open', mine: rec ? rec.raw : null };
@@ -1286,6 +1292,7 @@ function hostGo(pos) {
   H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null;
   const it = currentItem();
   if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
+  if (it && it.kind === 'handout') H.handoutsShown.add(it.id);
   if (it && it.signup && !H.signup) setSignup(true, true);
   broadcast({ t: 'spot', items: null });
   hideToolFromClass();
@@ -1310,7 +1317,7 @@ function saveHostSnap() {
       code: H.code, lessonId: H.lesson.id, pos: H.pos, phase: H.phase, review: H.review,
       students: [...H.students.values()].map(s => ({ id: s.id, token: s.token, name: s.name, vol: s.vol, shared: s.shared })),
       manual: H.manual, spin: H.spin, stars: H.stars, goalHit: [...H.goalHit],
-      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
+      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], handouts: [...H.handoutsShown], timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
     });
   }, 400);
 }
@@ -1351,6 +1358,7 @@ function itemLabel(it) {
     case 'check': return 'Check-in: ' + (it.prompt || '');
     case 'draw': return 'Drawing: ' + (it.prompt || '');
     case 'dots': return 'Dot map: ' + (it.prompt || '');
+    case 'handout': return '📄 Handout: ' + (it.title || '');
   }
   return '';
 }
@@ -1385,7 +1393,9 @@ function renderHostStage() {
   }
   const it = currentItem();
   if (it && it.hidden) stage.append(el('div', { class: 'hidden-banner', role: 'note' }, '🙈 Teacher only. Students still see: ' + (viewItem() ? itemLabel(viewItem()) : 'the waiting screen')));
-  if (it && it.kind === 'launch') {
+  if (it && it.kind === 'handout') {
+    renderHandoutStage(stage, it);
+  } else if (it && it.kind === 'launch') {
     renderLaunchStage(stage, it);
   } else if (!it) {
     stage.append(msgCard('🎤', 'Activities-only session', 'Use the share spinner, spotlight, pause and reactions. Students see a waiting screen.'));
@@ -3924,6 +3934,110 @@ function cleanPicQ(q, pieces) {
 }
 
 /* =====================================================================
+   28. HANDOUTS: a file (sent like slides) or a link students can open
+   ===================================================================== */
+const HANDOUT_MAX = 3 * 1024 * 1024, HANDOUT_WARN = 1024 * 1024;
+const HANDOUT_TYPES = '.pdf,application/pdf,image/*,.docx,.pptx,.xlsx,.doc,.ppt,.txt';
+function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+function handoutLinkOk(u) { try { const x = new URL(u); return x.protocol === 'https:'; } catch { return false; } }
+function handoutInfo(it) { return { hid: it.id, title: it.title || 'Handout', mid: it.file ? 'ho-' + it.id : null, fileName: it.fileName || '', size: it.file ? it.file.size : 0, link: it.link || '' }; }
+
+/* ---------- teacher ---------- */
+function handoutList() { return H.items.filter(it => it.kind === 'handout' && H.handoutsShown.has(it.id) && isStudentItem(it)).map(handoutInfo); }
+function renderHandoutStage(stage, it) {
+  const info = handoutInfo(it), got = (H.handoutGot[it.id] || new Set()).size, n = onlineStudents().length;
+  stage.append(el('div', { class: 'q-card handout-card' },
+    el('div', { class: 'tag' }, '📄 Handout'), el('div', { class: 'q-text', text: info.title }),
+    el('p', { class: 'muted' }, info.mid ? info.fileName + ' · ' + fmtSize(info.size) : info.link ? 'Link: ' + new URL(info.link).hostname : 'No file or link yet'),
+    el('p', { class: 'count-pill', id: 'handout-count' }, (info.link ? 'Opened' : 'Downloaded') + ' by ' + got + ' of ' + n),
+    el('div', { class: 'spin-buttons' },
+      info.mid ? el('a', { class: 'btn', href: H.urls.get(info.mid), download: info.fileName || 'handout', target: '_blank' }, 'Preview my copy') : null,
+      info.link ? el('a', { class: 'btn', href: info.link, target: '_blank', rel: 'noopener noreferrer' }, 'Open the link') : null),
+    el('p', { class: 'muted' }, 'Students keep it in a 📄 Handouts button for the rest of class.')));
+}
+function handoutGotMsg(st, m) {
+  const it = H.items.find(x => x.id === m.hid && x.kind === 'handout'); if (!it || st.demo) return;
+  (H.handoutGot[it.id] ||= new Set()).add(st.id);
+  const c = $('#handout-count'); if (c && currentItem() === it) c.textContent = (it.link && !it.file ? 'Opened' : 'Downloaded') + ' by ' + H.handoutGot[it.id].size + ' of ' + onlineStudents().length;
+}
+
+/* ---------- student ---------- */
+function handoutButton(h, big) {
+  const cls = 'btn ' + (big ? 'btn-primary handout-big' : 'btn-small');
+  const tell = () => sendHost({ t: 'hog', hid: h.hid });
+  if (h.link) return el('a', { class: cls, href: h.link, target: '_blank', rel: 'noopener noreferrer', onclick: tell }, '🔗 Open');
+  const u = mediaUrl(h.mid), s = S.slides.get(h.mid);
+  if (u && s && s.url) return el('a', { class: cls, href: u, download: h.fileName || 'handout', onclick: tell }, '⬇ Download');
+  const pct = s && s.size ? Math.round(100 * s.got / s.size) : 0;
+  return el('span', { class: 'muted handout-wait' }, '⏳ Getting it ready…' + (pct ? ' ' + pct + '%' : ''));
+}
+function buildHandoutView(v) {
+  addHandout(v);
+  const h = v.h;
+  return el('div', { class: 'q-card handout-card' }, el('div', { class: 'big-emoji', 'aria-hidden': 'true' }, '📄'),
+    el('div', { class: 'q-text', text: h.title }),
+    el('p', { class: 'muted' }, h.link ? 'Opens in a new tab.' : (h.fileName || 'File') + (h.size ? ' · ' + fmtSize(h.size) : '')),
+    handoutButton(h, true),
+    el('p', { class: 'muted' }, 'You can get it again any time from the 📄 Handouts button at the top.'));
+}
+function addHandout(v) {
+  if (!v || !v.h) return;
+  S.handouts = S.handouts || [];
+  if (!S.handouts.some(x => x.hid === v.h.hid)) S.handouts.push(v.h);
+  renderHandoutBtn();
+}
+function renderHandoutBtn() {
+  const b = $('#st-handouts'); const n = (S.handouts || []).length;
+  b.hidden = !n; b.textContent = '📄 Handouts' + (n > 1 ? ' (' + n + ')' : '');
+}
+function openHandouts() {
+  openModal((card, close) => card.append(el('h2', null, '📄 Handouts'),
+    el('ul', { class: 'handout-list' }, (S.handouts || []).map(h => el('li', null, el('span', null, h.title), handoutButton(h, false)))),
+    el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Close'))));
+}
+
+/* ---------- lesson builder ---------- */
+function handoutModal(item) {
+  const st = { title: item ? item.title : '', file: item ? item.file : null, fileName: item ? item.fileName : '', link: item ? item.link : '', mode: item && item.link && !item.file ? 'link' : 'file' };
+  openModal((card, close) => {
+    const area = el('div');
+    const title = el('input', { maxlength: 80, placeholder: 'Homophones, Homonyms & Homographs cheat sheet' }); title.value = st.title;
+    title.addEventListener('input', () => { st.title = title.value; });
+    const draw = () => {
+      area.replaceChildren(el('div', { class: 'seg' }, [['file', '📎 Attach a file'], ['link', '🔗 Paste a link']].map(([v, l]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(st.mode === v), onclick: () => { st.mode = v; draw(); } }, l))));
+      if (st.mode === 'file') {
+        area.append(el('p', { class: 'muted' }, 'PDF works best. Up to 3 MB; one-page cheat sheets are usually well under 1 MB.'),
+          el('div', { class: 'row-inline' }, fileButton(st.file ? 'Choose a different file' : 'Choose a file', HANDOUT_TYPES, f => {
+            if (f.size > HANDOUT_MAX) { toast('That file is ' + fmtSize(f.size) + '. Please keep handouts under 3 MB (try saving it as a PDF).'); return; }
+            st.file = f; st.fileName = cleanText(f.name, 80).replace(/[\\/:*?"<>|]/g, '_'); if (!st.title) { st.title = f.name.replace(/\.[a-z0-9]+$/i, ''); title.value = st.title; }
+            if (f.size > HANDOUT_WARN) toast('Heads up: ' + fmtSize(f.size) + ' takes a little longer to reach 60 students.');
+            draw();
+          }), st.file ? el('span', null, '📄 ' + st.fileName + ' · ' + fmtSize(st.file.size)) : null));
+      } else {
+        const ln = el('input', { maxlength: 500, placeholder: 'https://drive.google.com/…' }); ln.value = st.link || '';
+        ln.addEventListener('input', () => { st.link = ln.value.trim(); });
+        area.append(el('label', null, 'Link (https)'), ln, el('p', { class: 'muted' }, 'In Google Drive, share the file so students can view it (for example, anyone in your district with the link).'));
+      }
+    };
+    draw();
+    card.append(el('h2', null, item ? 'Edit handout' : '📄 Add a handout'), el('label', null, 'Title students see'), title, area,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          const t = cleanText(st.title, 80).trim();
+          if (!t) { toast('Give the handout a title.'); return; }
+          if (st.mode === 'file' && !st.file) { toast('Choose a file, or switch to a link.'); return; }
+          if (st.mode === 'link' && !handoutLinkOk(st.link)) { toast('Paste a link that starts with https://'); return; }
+          const data = st.mode === 'file' ? { file: st.file, fileName: st.fileName, link: '' } : { file: null, fileName: '', link: st.link };
+          if (item) Object.assign(item, { title: t }, data);
+          else B.lesson.items.push({ id: uid(), kind: 'handout', title: t, ...data, notes: '' });
+          saveLessonSoon(); renderBuilder(); close();
+          if (!item) toast('Handout added at the end of the lesson.');
+        } }, item ? 'Save' : 'Add handout'),
+        el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
+  });
+}
+
+/* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
    ===================================================================== */
 function openTeacher() {
@@ -4014,7 +4128,8 @@ async function exportLesson(l) {
   toast('Preparing lesson file…');
   const items = [];
   for (const it of l.items) {
-    const { blob, img, bg, pieces, src, ...rest } = it;
+    const { blob, img, bg, pieces, src, file, ...rest } = it;
+    if (file) rest.fileData = await blobToDataURL(file);
     if (blob) rest.data = await blobToDataURL(blob);
     if (pieces) rest.pieces = await Promise.all(pieces.map(async p => ({ id: p.id, w: p.w, h: p.h, box: p.box || null, data: await blobToDataURL(p.blob) })));
     if (src) rest.srcData = await blobToDataURL(src);
@@ -4038,7 +4153,13 @@ async function importLesson(file) {
     if (d.app !== APP || d.kind !== 'lesson' || !Array.isArray(d.items)) throw new Error('This isn’t a Sidekick Live lesson file.');
     const items = [];
     for (const it of d.items.slice(0, 200)) {
-      const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup, ...(it.hidden && (it.kind === 'slide' || it.kind === 'text') ? { hidden: true } : {}) };
+      const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup, ...(it.hidden && (it.kind === 'slide' || it.kind === 'text' || it.kind === 'handout') ? { hidden: true } : {}) };
+      if (it.kind === 'handout') {
+        const link = typeof it.link === 'string' && handoutLinkOk(it.link) ? it.link : '';
+        let file = null; if (typeof it.fileData === 'string' && /^data:[\w.+-]+\/[\w.+-]+;base64,/.test(it.fileData)) { file = await (await fetch(it.fileData)).blob(); if (file.size > HANDOUT_MAX) file = null; }
+        if (file || link) items.push({ ...base, kind: 'handout', title: cleanText(it.title, 80) || 'Handout', file, fileName: file ? cleanText(it.fileName, 80).replace(/[\\/:*?"<>|]/g, '_') : '', link: file ? '' : link });
+        continue;
+      }
       if (it.kind === 'launch') { const L = cleanLaunch(it.launch); if (L) items.push({ id: base.id, kind: 'launch', launch: L, notes: base.notes }); continue; }
       if (it.kind === 'slide' && typeof it.data === 'string' && /^data:image\/(webp|jpeg|png);base64,/.test(it.data)) {
         const blob = await (await fetch(it.data)).blob(); items.push({ ...base, kind: 'slide', blob, w: +it.w || 0, h: +it.h || 0 });
@@ -4225,6 +4346,7 @@ function renderBuilder() {
     else if (it.kind === 'dots') thumb = it.bg ? el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.bg), alt: '' }), el('span', null, '📍 Dot map')) : el('div', { class: 'thumb' }, '📍 Dot map');
     else if (it.kind === 'q' && it.pieces && it.pieces.length) thumb = el('div', { class: 'thumb thumb-pics' }, it.pieces.slice(0, 4).map(p => el('img', { src: blobUrl(p.blob), alt: '' })));
     else if (it.kind === 'q' && it.img) thumb = el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.img), alt: '' }), el('span', null, '❓ ' + TYPE_LABEL[it.q.type]));
+    else if (it.kind === 'handout') thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, '📄'), 'Handout');
     else if (it.kind === 'launch') { const t = LAUNCH_TOOLS[(it.launch || {}).tool] || { icon: '🚀', name: 'Launch' }; thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, t.icon), '🚀 ' + t.name); }
     else thumb = el('div', { class: 'thumb' }, { text: '📝 Text slide', q: '❓ ' + TYPE_LABEL[it.q && it.q.type], check: '😀 Check-in' }[it.kind]);
     const fields = el('div', { class: 'bld-fields' });
@@ -4233,6 +4355,9 @@ function renderBuilder() {
       inp.addEventListener('input', () => { it[key] = inp.value; saveLessonSoon(); });
       fields.append(el('label', null, label), inp);
     };
+    if (it.kind === 'handout') fields.append(el('div', { class: 'tag' }, '📄 Handout'), el('div', null, el('strong', null, it.title || 'Handout')),
+      el('p', { class: 'muted launch-sum' }, it.file ? (it.fileName || 'file') + ' · ' + fmtSize(it.file.size) : it.link ? 'Link: ' + it.link : 'No file yet'),
+      el('div', null, el('button', { class: 'btn btn-small', onclick: () => handoutModal(it) }, '✎ Edit handout')));
     if (it.kind === 'launch') fields.append(el('div', { class: 'tag' }, '🚀 Launch card · students don’t see it'), el('p', { class: 'muted launch-sum' }, launchSummary(it.launch)), el('div', null, el('button', { class: 'btn btn-small', onclick: () => launchModal(it) }, '⚙ Edit settings')));
     if (it.kind === 'text') { field('Title', 'title', false, 120); field('Text', 'body', true, 2000); }
     if (it.kind === 'check') field('Check-in question', 'prompt', false, 200);
@@ -4254,8 +4379,8 @@ function renderBuilder() {
     field('Teacher notes (only you see these)', 'notes', true, 1000);
     const su = el('input', { type: 'checkbox' }); su.checked = !!it.signup;
     su.addEventListener('change', () => { it.signup = su.checked; saveLessonSoon(); });
-    if (it.kind !== 'launch') fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
-    if (it.kind === 'slide' || it.kind === 'text') {
+    if (it.kind !== 'launch' && it.kind !== 'handout') fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
+    if (it.kind === 'slide' || it.kind === 'text' || it.kind === 'handout') {
       const hd = el('input', { type: 'checkbox' }); hd.checked = !!it.hidden;
       hd.addEventListener('change', () => { it.hidden = hd.checked; saveLessonSoon(); renderBuilder(); });
       fields.append(el('label', { class: 'check small' }, hd, '🙈 Teacher only (students don’t see this)'));
@@ -4264,12 +4389,32 @@ function renderBuilder() {
     list.append(el('li', null, thumb, fields, el('div', { class: 'bld-actions' },
       el('button', { class: 'btn btn-small', 'aria-label': 'Move up', disabled: i === 0, onclick: () => move(-1) }, '▲'),
       el('button', { class: 'btn btn-small', 'aria-label': 'Move down', disabled: i === items.length - 1, onclick: () => move(1) }, '▼'),
+      items.length > 2 ? moveToSelect(items, i) : null,
       it.kind === 'slide' ? el('button', { class: 'btn btn-small', title: 'Add a drawing question right after this slide, with this slide as the picture', onclick: () => {
         items.splice(i + 1, 0, { id: uid(), kind: 'draw', prompt: 'Mark up this slide.', bg: it.blob, bgW: it.w, bgH: it.h, read: '', notes: '' });
         saveLessonSoon(); renderBuilder(); toast('Drawing question added after this slide.'); } }, '✏️ Draw on it') : null,
       it.kind === 'slide' ? el('button', { class: 'btn btn-small', title: 'Add a dot map right after this slide, using this slide', onclick: () => addDotsModal(it) }, '📍 Dot map on it') : null,
       el('button', { class: 'btn btn-small btn-danger', 'aria-label': 'Remove item', onclick: () => { items.splice(i, 1); saveLessonSoon(); renderBuilder(); } }, '✕'))));
   });
+}
+function moveToSelect(items, i) {
+  const short = t => (t.length > 34 ? t.slice(0, 33) + '…' : t);
+  const s = el('select', { class: 'move-to', 'aria-label': 'Move item ' + (i + 1) + ' to position' },
+    el('option', { value: '' }, 'Move to…'),
+    items.map((x, j) => {
+      if (j === i) return null;
+      const lab = x.kind === 'slide' ? 'Slide ' + (items.filter(y => y.kind === 'slide').indexOf(x) + 1) + (x.hidden ? ' (teacher only)' : '') : itemLabel(x);
+      return el('option', { value: String(j) }, '→ ' + (j + 1) + ' (now: ' + short(lab) + ')');
+    }));
+  s.addEventListener('change', () => {
+    if (s.value === '') return;
+    const to = +s.value, [moved] = items.splice(i, 1);
+    items.splice(to, 0, moved);
+    saveLessonSoon(); renderBuilder();
+    const row = $('#bld-list').children[to]; if (row) { row.scrollIntoView({ block: 'center', behavior: reduceMotion() ? 'auto' : 'smooth' }); row.classList.add('just-moved'); setTimeout(() => row.classList.remove('just-moved'), 1600); }
+    toast('Moved to position ' + (to + 1) + '.');
+  });
+  return s;
 }
 function addDrawModal() {
   const slides = B.lesson.items.filter(x => x.kind === 'slide');
@@ -4444,6 +4589,8 @@ function init() {
   $('#bld-add-dots').addEventListener('click', () => addDotsModal(null));
   $('#bld-add-launch').addEventListener('click', () => launchModal(null));
   $('#bld-add-pic').addEventListener('click', () => picModal(null));
+  $('#bld-add-handout').addEventListener('click', () => handoutModal(null));
+  $('#st-handouts').addEventListener('click', openHandouts);
   $('#notes-minus').addEventListener('click', () => notesSize(-0.1));
   $('#notes-plus').addEventListener('click', () => notesSize(0.1));
   $('#notes-pop').addEventListener('click', openNotesWin);

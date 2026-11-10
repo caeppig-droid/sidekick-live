@@ -365,6 +365,18 @@ body.safe .race-members { filter: blur(6px); }
 .pic-editor h3 { margin: 14px 0 4px; }
 .pic-pair-row select, .pic-pair-row input { width: auto; min-height: 38px; }
 
+/* handouts */
+.handout-card { max-width: 34em; text-align: center; display: grid; justify-items: center; gap: 6px; }
+.handout-card .big-emoji { font-size: 3rem; }
+.handout-big { font-size: 1.2rem; min-height: 56px; padding: .4em 1.6em; text-decoration: none; }
+a.btn { text-decoration: none; }
+.handout-wait { font-weight: 700; }
+.handout-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.handout-list li { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--paper); border-radius: 10px; padding: 8px 12px; font-weight: 600; }
+
+.bld-actions .move-to { min-height: 34px; padding: .15em .3em; font-size: .8rem; width: 8.5em; }
+.bld-list > li.just-moved { border-color: var(--sun-deep); box-shadow: 0 0 0 3px #FFE39A; transition: box-shadow .3s; }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }
