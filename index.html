@@ -107,9 +107,11 @@
     <label class="btn"><input type="file" id="bld-files" accept="image/*,.pdf,application/pdf" multiple hidden>Add slides (images or PDF)</label>
     <button class="btn" id="bld-add-text">Add text slide</button>
     <button class="btn" id="bld-add-q">Add questions</button>
+    <button class="btn" id="bld-add-pic">🖼 Add picture activity</button>
     <button class="btn" id="bld-add-draw">Add drawing question</button>
     <button class="btn" id="bld-add-dots">Add dot map</button>
     <button class="btn" id="bld-add-check">Add check-in</button>
+    <button class="btn" id="bld-add-launch">🚀 Add launch card</button>
     <span id="bld-status" class="muted" aria-live="polite"></span>
   </div>
   <ol id="bld-list" class="bld-list"></ol>
@@ -144,6 +146,7 @@
       <div class="side-block">
         <h2>Up next</h2>
         <div id="h-next-preview" class="next-preview"></div>
+        <div class="notes-bar"><span class="muted">Notes</span><button class="btn btn-small" id="notes-minus" aria-label="Smaller notes">A−</button><button class="btn btn-small" id="notes-plus" aria-label="Bigger notes">A+</button><button class="btn btn-small" id="notes-pop" title="Open your notes in their own window">⧉ Pop out</button></div>
         <div id="h-notes" class="notes"></div>
       </div>
       <div class="side-block tools-grid">

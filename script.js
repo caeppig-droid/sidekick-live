@@ -156,6 +156,7 @@ function csvCell(v) {
   if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
   return s;
 }
+const PII_NOTICE = 'CONFIDENTIAL: This report contains student personally identifiable information (PII), which is protected by state and federal law, including FERPA (20 U.S.C. § 1232g). Use it only for school purposes, keep it in district-approved storage, share it only with people who need it for the student’s education, and delete it when it is no longer needed.';
 function toCSV(rows) { return '\uFEFF' + rows.map(r => r.map(csvCell).join(',')).join('\r\n'); }
 
 /* =====================================================================
@@ -179,7 +180,7 @@ const TYPE_ALIASES = {
   'match': 'match', 'matching': 'match',
   'sort': 'sort', 'sorting': 'sort', 'categorize': 'sort'
 };
-const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True/False', type: 'Type the answer', wordbank: 'Word bank', order: 'Put in order', match: 'Match', sort: 'Sort', draw: 'Drawing', dots: 'Dot map', wordbuild: 'Word builder' };
+const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True/False', type: 'Type the answer', wordbank: 'Word bank', order: 'Put in order', match: 'Match', sort: 'Sort', draw: 'Drawing', dots: 'Dot map', wordbuild: 'Word builder', psort: 'Picture sort', pmatch: 'Picture match' };
 function pairs(q) { return q.choices.map(c => { const i = c.indexOf('='); return [c.slice(0, i).trim(), c.slice(i + 1).trim()]; }); }
 function cells(list) { return (list || []).map(x => cleanText(x, 160).trim()).filter(Boolean).slice(0, 6); }
 
@@ -269,6 +270,7 @@ function sameNumber(a, b) {
   return Number(x) === Number(y);
 }
 function publicQ(q, qid) {
+  if (q.type === 'psort' || q.type === 'pmatch') return picPublic(q, qid);
   const p = { qid, type: q.type, text: q.text, read: q.read || '' };
   switch (q.type) {
     case 'mc': p.options = shuffle(q.choices); break;
@@ -285,17 +287,18 @@ function sanitizeAnswer(q, a) {
   switch (q.type) {
     case 'mc': case 'tf': case 'type': return typeof a === 'string' && a.trim() ? s(a) : null;
     case 'wordbank': case 'order': return Array.isArray(a) && a.length > 0 && a.length <= 40 ? a.map(s) : null;
-    case 'match': case 'sort': {
+    case 'match': case 'sort': case 'psort': case 'pmatch': {
       if (!a || typeof a !== 'object' || Array.isArray(a)) return null;
-      const o = Object.create(null); let n = 0;
-      for (const [k, v] of Object.entries(a)) { if (n++ >= 40) break; o[s(k)] = s(v); }
+      const o = {}; let n = 0;   // a plain object (it must be sendable), skipping keys that could change its prototype
+      for (const [k, v] of Object.entries(a)) { if (n++ >= 40) break; const key = s(k); if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue; o[key] = s(v); }
       return o;
     }
   }
   return null;
 }
-function grade(q, a) {
+function grade(q, a, pub) {
   try {
+    if (q.type === 'psort' || q.type === 'pmatch') return picGrade(q, a, pub);
     switch (q.type) {
       case 'mc': case 'tf': return norm(a) === norm(q.answer[0]);
       case 'type': return q.answer.some(x => norm(x) === norm(a) || sameNumber(x, a));
@@ -306,13 +309,15 @@ function grade(q, a) {
   } catch { /* fall through */ }
   return false;
 }
-function answerText(q, a) {
+function answerText(q, a, pub) {
   if (a == null) return '';
+  if (q.type === 'psort' || q.type === 'pmatch') return picAnswerText(q, a, pub);
   if (typeof a === 'string') return a;
   if (Array.isArray(a)) return a.join(q.type === 'order' ? ' > ' : ' | ');
   return Object.entries(a).map(([k, v]) => k + (q.type === 'sort' ? ' -> ' : ' = ') + v).join('; ');
 }
 function correctText(q) {
+  if (q.type === 'psort' || q.type === 'pmatch') return picCorrectText(q);
   switch (q.type) {
     case 'mc': case 'tf': case 'type': return q.answer[0];
     case 'wordbank': return q.answer.join(', ');
@@ -589,6 +594,7 @@ function onSlideChunk(m) {
   s.buf.set(d, m.o); s.got = Math.max(s.got, m.o + d.length);
   if (s.got >= s.size) {
     s.url = URL.createObjectURL(new Blob([s.buf], { type: s.mime })); s.buf = null;
+    if (!m.p && m.sid.startsWith('pp-')) { picArrived(m.sid); return; }
     if (!m.p) { const pv = S.previews.get(m.sid); if (pv && pv.url) { setTimeout(() => URL.revokeObjectURL(pv.url), 5000); S.previews.delete(m.sid); } }
     else if (S.slides.get(m.sid)?.url) return;   // full one already here
     const v = S.view;
@@ -727,7 +733,7 @@ function buildStudentQ(v) {
     body.append(inp);
     getAnswer = () => inp.value.trim(); complete = () => inp.value.trim().length > 0;
   } else {
-    const ui = ({ wordbank: bankUI, order: orderUI, match: matchUI, sort: sortUI })[q.type](q, mine, locked);
+    const ui = ({ wordbank: bankUI, order: orderUI, match: matchUI, sort: sortUI, psort: picSortUI, pmatch: picMatchUI })[q.type](q, mine, locked);
     body.append(ui.node);
     getAnswer = ui.get; complete = ui.done;
   }
@@ -788,7 +794,7 @@ let studentSpinTimer = null;
 function studentSpin(m) {
   const ov = $('#spin-overlay');
   $('#spin-host-controls').hidden = true;
-  if (m.ph === 'close') { ov.hidden = true; clearInterval(studentSpinTimer); return; }
+  if (m.ph === 'close') { ov.hidden = true; clearInterval(studentSpinTimer); $('#spin-title').textContent = 'Share spinner'; return; }
   ov.hidden = false;
   const vis = $('#spin-visual'), res = $('#spin-result');
   if (m.ph === 'ready') {
@@ -808,6 +814,7 @@ function studentSpin(m) {
     vis.replaceChildren(el('div', { class: 'mystery', 'aria-hidden': 'true' }, '🎤'));
     const b = el('button', { class: 'vol-toggle', 'aria-pressed': String(S.vol), onclick: () => { toggleVol(); b.setAttribute('aria-pressed', String(S.vol)); } },
       el('span', { class: 'vol-box', 'aria-hidden': 'true' }), el('span', null, 'I’d like to share on the mic 🎤'));
+    $('#spin-title').textContent = m.prompt ? '🎤 ' + cleanText(m.prompt, 140) : 'Share spinner';
     res.replaceChildren(el('span', { class: 'sub' }, 'The share spinner is open.'), S.view && S.view.signup ? b : null);
   } else if (m.ph === 'skip') {
     res.replaceChildren(el('span', { class: 'sub' }, 'Let’s spin again!'));
@@ -905,7 +912,8 @@ async function startHost(lesson, snap) {
     dice: { n: 1, custom: false, text: 'add\nsubtract\nmultiply' }, wheel: { listId: null, remove: false, used: {} },
     mediaIds: [], imgCache: {}, galleryDirty: false, lastGallery: 0,
     dotState: snap && snap.dotState ? snap.dotState : {}, dotsDirty: false, lastDots: 0, dotPaint: null,
-    wb: snap && snap.wb ? snap.wb : null, wbDirty: false, lastWb: 0
+    wb: snap && snap.wb ? snap.wb : null, wbDirty: false, lastWb: 0,
+    spos: snap ? (snap.spos != null ? snap.spos : snap.pos) : -1, launched: new Set(snap && snap.launched ? snap.launched : []), spinPrompt: null
   };
   H.report = snap ? (lsGet(KEYS.report, null) || newReport(lesson, H.code)) : newReport(lesson, H.code);
   H.report.lessonId = lesson.id;
@@ -922,7 +930,14 @@ async function startHost(lesson, snap) {
     H.urls.set(mid, URL.createObjectURL(blob));
     H.mediaIds.push(mid); if (it.kind === 'slide') H.sids.push(mid);
   }
+  for (const it of H.items) for (const p of picPieces(it)) {   // picture-activity pieces (small, no preview needed)
+    const mid = picMid(p.id), buf = new Uint8Array(await p.blob.arrayBuffer());
+    H.slideData.set(mid, { buf, size: buf.length, mime: p.blob.type || 'image/webp', pbuf: null, psize: 0, pmime: '' });
+    H.urls.set(mid, URL.createObjectURL(p.blob)); H.mediaIds.push(mid);
+  }
   if (H.timer.total && H.timer.left <= 0) H.timer.total = 0;
+  for (const it of H.items) if (it.kind === 'slide' && it.hidden && it.blob) H.urls.set(it.id, URL.createObjectURL(it.blob));   // teacher-only slides: shown to the teacher, never sent
+  if (!snap) H.spos = isStudentItem(H.items[0]) ? 0 : -1;
   document.body.classList.remove('safe'); $('#h-safe').checked = false;
   show('screen-host');
   updateHostHeader();
@@ -935,7 +950,7 @@ async function startHost(lesson, snap) {
   renderHostStage(); renderHostSide(); saveReport(); saveHostSnap();
 }
 function mediaIdFor(it) {
-  if (!it) return null;
+  if (!it || it.hidden || it.kind === 'launch') return null;
   if (it.kind === 'slide') return it.blob ? it.id : null;
   if (it.kind === 'q') return it.img ? 'qi-' + it.id : null;
   if (it.kind === 'draw') return it.bg ? 'db-' + it.id : null;
@@ -1091,12 +1106,12 @@ function resultsFor(it) {
   return res;
 }
 function viewMsg(st, cache) {
-  const base = { t: 'view', paused: H.paused, look: H.look, review: H.review, signup: H.signup, pos: H.pos, total: H.items.length };
+  const base = { t: 'view', paused: H.paused, look: H.look, review: H.review, signup: H.signup, pos: H.spos, total: H.items.length };
   if (H.ended) return { t: 'view', k: 'end' };
   if (H.race && H.race.active) return raceView(base, st);
   if (H.boss && H.boss.active) return bossView(base, st);
   if (H.wb && H.wb.active) return wbView(base, st);
-  const it = currentItem();
+  const it = viewItem();
   if (!it) return { ...base, k: 'wait' };
   switch (it.kind) {
     case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '', ink: H.ink[it.id] || [] };
@@ -1109,7 +1124,9 @@ function viewMsg(st, cache) {
     case 'check': { const c = H.report.checkins[it.id]; return { ...base, k: 'check', iid: it.id, prompt: it.prompt || '', mine: c && c.votes[st.id] || null }; }
     case 'q': {
       const ph = H.phase[it.id] || 'open', rec = (H.report.answers[it.id] || {})[st.id];
-      const v = { ...base, k: 'q', q: getPub(it), phase: ph, mine: rec ? rec.raw : null };
+      const pub = getPub(it);
+      let sendQ = pub; if (pub.keyText) { const { keyText, ...rest } = pub; sendQ = rest; }   // the answer key stays on the teacher's computer
+      const v = { ...base, k: 'q', q: sendQ, phase: ph, mine: rec ? rec.raw : null };
       if (ph === 'results') {
         v.results = cache ? (cache.res ||= resultsFor(it)) : resultsFor(it);
         v.my = { answered: !!rec, correct: !!(rec && rec.correct), answer: correctText(it.q) };
@@ -1121,7 +1138,7 @@ function viewMsg(st, cache) {
 }
 function broadcastView() { const cache = {}; for (const st of H.students.values()) if (st.online) send(st, viewMsg(st, cache)); }
 function liveMsg() {
-  const it = currentItem();
+  const it = viewItem();
   let answered = null;
   if ((H.wb && H.wb.active) || (H.boss && H.boss.active) || (H.race && H.race.active)) answered = null;
   else if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) answered = Object.keys(H.report.answers[it.id] || {}).filter(sid => !isDemoId(sid)).length;
@@ -1139,7 +1156,7 @@ function ensureReportQuestion(it) {
 function hostAnswer(st, m) {
   if (H.race && H.race.active) { raceAnswer(st, m); return; }
   if (H.boss && H.boss.active) { bossAnswer(st, m); return; }
-  const it = currentItem();
+  const it = viewItem();
   if (!it || (it.kind !== 'q' && it.kind !== 'draw' && it.kind !== 'dots') || m.qid !== it.id || (H.phase[it.id] || 'open') !== 'open') return;
   if (it.kind === 'dots') {
     const rec = dotAnswer(it, m.a); if (!rec) return;
@@ -1150,7 +1167,8 @@ function hostAnswer(st, m) {
     H.galleryDirty = true;
   } else {
     const a = sanitizeAnswer(it.q, m.a); if (a == null) return;
-    (H.report.answers[it.id] ||= {})[st.id] = { raw: a, a: answerText(it.q, a), correct: grade(it.q, a), t: Date.now() };
+    const pub = getPub(it);
+    (H.report.answers[it.id] ||= {})[st.id] = { raw: a, a: answerText(it.q, a, pub), correct: grade(it.q, a, pub), t: Date.now() };
   }
   ensureReportQuestion(it);
   send(st, { t: 'ack', qid: it.id });
@@ -1161,7 +1179,7 @@ function hostAnswer(st, m) {
   }
 }
 function hostCheckin(st, m) {
-  const it = currentItem();
+  const it = viewItem();
   if (!it || it.kind !== 'check' || m.iid !== it.id || !CHECKIN.some(c => c.v === m.v)) return;
   const c = (H.report.checkins[it.id] ||= { prompt: it.prompt || 'Check-in', votes: {} });
   c.votes[st.id] = m.v; H.liveDirty = true; H.reportDirty = true;
@@ -1199,12 +1217,14 @@ function hostTick() {
   if (now - H.lastSave > 2000 && H.reportDirty) { H.lastSave = now; saveReport(); }
 }
 function bufferedOf(st) { const c = st.conn; const dc = c && c.dataChannel; return (dc ? dc.bufferedAmount : 0) + ((c && c.bufferSize) || 0) * CHUNK; }
+function picPieces(it) { return it && it.kind === 'q' && Array.isArray(it.pieces) && !it.hidden ? it.pieces.filter(p => p.blob) : []; }
+function itemMids(it) { return [mediaIdFor(it), ...picPieces(it).map(p => picMid(p.id))].filter(m => m && H.slideData.has(m)); }
 function slideOrder() {
   // current slide first, then forward, then the rest
   if (H._orderPos === H.pos && H._order) return H._order;
-  const idx = H.items.map((it, i) => (mediaIdFor(it) && H.slideData.has(mediaIdFor(it))) ? i : -1).filter(i => i >= 0);
+  const idx = H.items.map((it, i) => itemMids(it).length ? i : -1).filter(i => i >= 0);
   const fwd = idx.filter(i => i >= H.pos), back = idx.filter(i => i < H.pos).reverse();
-  H._order = [...fwd, ...back].map(i => mediaIdFor(H.items[i])); H._orderPos = H.pos;
+  H._order = [...fwd, ...back].flatMap(i => itemMids(H.items[i])); H._orderPos = H.pos;
   return H._order;
 }
 function pumpSlides(now) {
@@ -1232,8 +1252,8 @@ function pumpSlides(now) {
   }
 }
 function nextPart(st, order) {
-  const cm = mediaIdFor(currentItem());
-  if (cm && H.slideData.has(cm) && !st.have.has(cm)) {
+  const cm = itemMids(viewItem()).find(m => !st.have.has(m));
+  if (cm) {
     const d = H.slideData.get(cm);
     if (d.pbuf && !st.havePrev.has(cm) && !st.sent.has(cm)) return { sid: cm, prev: true, level: 0 };
     return { sid: cm, prev: false, level: 1 };
@@ -1259,6 +1279,10 @@ function hostGo(pos) {
   if (H.wb && H.wb.active) { toast('End the word builder to go back to the lesson.'); return; }
   if (H.boss && H.boss.active) { toast('End the boss battle to go back to the lesson.'); return; }
   if (H.race && H.race.active) { toast('End the race to go back to the lesson.'); return; }
+  if (!isStudentItem(H.items[pos])) {   // teacher-only item or launch card: students stay where they are
+    H.pos = pos; H.inkCanvas = null; H.dotPaint = null; renderHostStage(); renderHostSide(); saveHostSnap(); return;
+  }
+  H.spos = pos;
   H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null;
   const it = currentItem();
   if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
@@ -1286,7 +1310,7 @@ function saveHostSnap() {
       code: H.code, lessonId: H.lesson.id, pos: H.pos, phase: H.phase, review: H.review,
       students: [...H.students.values()].map(s => ({ id: s.id, token: s.token, name: s.name, vol: s.vol, shared: s.shared })),
       manual: H.manual, spin: H.spin, stars: H.stars, goalHit: [...H.goalHit],
-      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
+      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
     });
   }, 400);
 }
@@ -1318,6 +1342,8 @@ async function endSession() {
    ===================================================================== */
 function itemLabel(it) {
   if (!it) return '';
+  if (it.kind === 'launch') { const t = LAUNCH_TOOLS[(it.launch || {}).tool] || { icon: '🚀', name: 'Launch card' }; return '🚀 ' + t.icon + ' ' + t.name + ' (launch card)'; }
+  if (it.hidden) return '🙈 ' + (it.kind === 'slide' ? 'Slide (teacher only)' : 'Text: ' + (it.title || 'Untitled') + ' (teacher only)');
   switch (it.kind) {
     case 'slide': return 'Slide';
     case 'text': return 'Text: ' + (it.title || 'Untitled');
@@ -1331,6 +1357,7 @@ function itemLabel(it) {
 function hostQPreview(it) {
   const q = it.q, p = getPub(it);
   const card = el('div', { class: 'q-card' }, el('div', { class: 'tag', text: TYPE_LABEL[q.type] }), el('div', { class: 'q-text', text: q.text }));
+  if (q.type === 'psort' || q.type === 'pmatch') { picHostPreview(it, card); return card; }
   if (p.img) card.append(el('div', { class: 'q-img' }, el('img', { src: H.urls.get(p.img), alt: 'Question picture' })));
   const list = p.options || p.items || p.bank || (p.lefts ? p.lefts.map((l, i) => l + '  ·  ' + (p.rights[i] || '')) : null);
   if (list) card.append(el('ul', { class: 'q-preview' }, list.map(x => el('li', { text: x }))));
@@ -1340,6 +1367,7 @@ function hostQPreview(it) {
 function renderHostStage() {
   if (!H) return;
   const stage = $('#h-stage'); stage.replaceChildren();
+  setTimeout(updateNotesWin, 0);
   $('#h-wb').setAttribute('aria-pressed', String(!!(H.wb && H.wb.active)));
   $('#h-boss').setAttribute('aria-pressed', String(!!(H.boss && H.boss.active)));
   $('#h-race').setAttribute('aria-pressed', String(!!(H.race && H.race.active)));
@@ -1356,7 +1384,10 @@ function renderHostStage() {
     $('#h-pos').textContent = 'Word builder'; $('#h-notes').textContent = ''; $('#h-next-preview').textContent = 'Back to the lesson when you end the word builder.'; return;
   }
   const it = currentItem();
-  if (!it) {
+  if (it && it.hidden) stage.append(el('div', { class: 'hidden-banner', role: 'note' }, '🙈 Teacher only. Students still see: ' + (viewItem() ? itemLabel(viewItem()) : 'the waiting screen')));
+  if (it && it.kind === 'launch') {
+    renderLaunchStage(stage, it);
+  } else if (!it) {
     stage.append(msgCard('🎤', 'Activities-only session', 'Use the share spinner, spotlight, pause and reactions. Students see a waiting screen.'));
   } else if (it.kind === 'slide') {
     stage.append(inkToolbar(it));
@@ -1452,7 +1483,8 @@ function openSpinner() {
     $('#spin-skip').hidden = true;
   }
   renderSpinPool();
-  broadcast({ t: 'spin', ph: 'ready-open' });
+  broadcast({ t: 'spin', ph: 'ready-open', prompt: H.spinPrompt || '' });
+  $('#spin-title').textContent = H.spinPrompt ? '🎤 ' + H.spinPrompt : 'Share spinner';
 }
 function renderSpinPool() {
   if (!H || $('#spin-overlay').hidden || $('#spin-host-controls').hidden) return;
@@ -1523,7 +1555,7 @@ function skipPick() {
 }
 function closeSpinner() {
   $('#spin-overlay').hidden = true;
-  if (H) { broadcast({ t: 'spin', ph: 'close' }); $('#spin-go').textContent = 'Spin'; }
+  if (H) { broadcast({ t: 'spin', ph: 'close' }); $('#spin-go').textContent = 'Spin'; H.spinPrompt = null; $('#spin-title').textContent = 'Share spinner'; }
 }
 
 /* ---- spotlight ---- */
@@ -1868,8 +1900,8 @@ function inkToolbar(it) {
     onclick: () => { H.tool = H.tool === t ? null : t; renderHostStage(); } }, label)));
   bar.append(el('span', { class: 'swatches' }, INK_COLORS.map(c => el('button', { class: 'swatch', type: 'button', 'aria-label': 'Pen color', 'aria-pressed': String(H.inkColor === c), style: 'background:' + c,
     onclick: () => { H.inkColor = c; if (H.tool !== 'pen') H.tool = 'pen'; renderHostStage(); } }))));
-  bar.append(el('button', { class: 'tool-btn', type: 'button', onclick: () => { const l = H.ink[it.id] || []; const s = l.pop(); if (s) { broadcast({ t: 'ink', op: 'del', iid: it.id, id: s.id }); redrawInk(H.inkCanvas, l); saveHostSnap(); } } }, '↶ Undo'),
-    el('button', { class: 'tool-btn', type: 'button', onclick: () => { H.ink[it.id] = []; broadcast({ t: 'ink', op: 'clear', iid: it.id }); redrawInk(H.inkCanvas, []); saveHostSnap(); } }, '🗑 Clear'));
+  bar.append(el('button', { class: 'tool-btn', type: 'button', onclick: () => { const l = H.ink[it.id] || []; const s = l.pop(); if (s) { inkCast(it, { t: 'ink', op: 'del', iid: it.id, id: s.id }); redrawInk(H.inkCanvas, l); saveHostSnap(); } } }, '↶ Undo'),
+    el('button', { class: 'tool-btn', type: 'button', onclick: () => { H.ink[it.id] = []; inkCast(it, { t: 'ink', op: 'clear', iid: it.id }); redrawInk(H.inkCanvas, []); saveHostSnap(); } }, '🗑 Clear'));
   return bar;
 }
 function attachHostInk(frame, it) {
@@ -1877,24 +1909,24 @@ function attachHostInk(frame, it) {
   const list = () => (H.ink[it.id] ||= []);
   requestAnimationFrame(() => redrawInk(c, list()));
   let cur = null, buf = [], flushT = null, lastLz = 0, erasing = false, drawing = false;
-  const flush = () => { flushT = null; if (cur && buf.length) { broadcast({ t: 'ink', op: 'pts', iid: it.id, id: cur.id, p: buf }); buf = []; } };
+  const flush = () => { flushT = null; if (cur && buf.length) { inkCast(it, { t: 'ink', op: 'pts', iid: it.id, id: cur.id, p: buf }); buf = []; } };
   c.addEventListener('pointerdown', e => {
     if (!H.tool) return;
     e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     const [x, y] = canvasPos(c, e); drawing = true;
-    if (H.tool === 'pointer') { broadcast({ t: 'pt', x: x / 10000, y: y / 10000 }); showPointer($('#h-stage'), x / 10000, y / 10000); }
-    else if (H.tool === 'laser') { broadcast({ t: 'lz', x, y }); showLaser($('#h-stage'), { x, y }); lastLz = performance.now(); }
+    if (H.tool === 'pointer') { inkCast(it, { t: 'pt', x: x / 10000, y: y / 10000 }); showPointer($('#h-stage'), x / 10000, y / 10000); }
+    else if (H.tool === 'laser') { inkCast(it, { t: 'lz', x, y }); showLaser($('#h-stage'), { x, y }); lastLz = performance.now(); }
     else if (H.tool === 'eraser') { erasing = true; eraseAt(x, y); }
     else {
       if (list().length >= 300) { toast('This slide has a lot of ink. Clear some first.'); return; }
       cur = { id: uid(6), c: H.tool === 'hl' ? HIGHLIGHT : H.inkColor, w: H.tool === 'hl' ? 24 : 5, hl: H.tool === 'hl', p: [x, y] };
-      list().push(cur); broadcast({ t: 'ink', op: 'start', iid: it.id, s: cur }); redrawInk(c, list());
+      list().push(cur); inkCast(it, { t: 'ink', op: 'start', iid: it.id, s: cur }); redrawInk(c, list());
     }
   });
   c.addEventListener('pointermove', e => {
     if (!drawing) return;
     const [x, y] = canvasPos(c, e);
-    if (H.tool === 'laser') { const n = performance.now(); if (n - lastLz > 70) { lastLz = n; broadcast({ t: 'lz', x, y }); } showLaser($('#h-stage'), { x, y }); return; }
+    if (H.tool === 'laser') { const n = performance.now(); if (n - lastLz > 70) { lastLz = n; inkCast(it, { t: 'lz', x, y }); } showLaser($('#h-stage'), { x, y }); return; }
     if (erasing) { eraseAt(x, y); return; }
     if (!cur) return;
     const p = cur.p, lx = p[p.length - 2], ly = p[p.length - 1];
@@ -1905,13 +1937,13 @@ function attachHostInk(frame, it) {
   });
   const end = () => {
     if (!drawing) return; drawing = false;
-    if (H.tool === 'laser') { broadcast({ t: 'lz', off: 1 }); showLaser($('#h-stage'), { off: 1 }); }
+    if (H.tool === 'laser') { inkCast(it, { t: 'lz', off: 1 }); showLaser($('#h-stage'), { off: 1 }); }
     clearTimeout(flushT); flush(); cur = null; erasing = false; saveHostSnap();
   };
   c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end); c.addEventListener('pointerleave', end);
   function eraseAt(x, y) {
     const l = list(), i = strokeNear(l, x, y, 180);
-    if (i >= 0) { const s = l.splice(i, 1)[0]; broadcast({ t: 'ink', op: 'del', iid: it.id, id: s.id }); redrawInk(c, l); }
+    if (i >= 0) { const s = l.splice(i, 1)[0]; inkCast(it, { t: 'ink', op: 'del', iid: it.id, id: s.id }); redrawInk(c, l); }
   }
 }
 window.addEventListener('resize', () => {
@@ -2054,7 +2086,7 @@ async function downloadDrawings(qids, report, lesson) {
     parts.push('<h2>' + escapeHTML((q ? 'Question ' + q.n + ': ' + q.text : 'Drawing question')) + '</h2>' + (figs.join('') || '<p>No drawings.</p>'));
   }
   made.forEach(u => URL.revokeObjectURL(u));
-  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sidekick Live drawings</title><style>body{font-family:system-ui,sans-serif;margin:24px;color:#1E2B4A}figure{display:inline-block;margin:8px;width:300px;vertical-align:top}img{width:100%;border:1px solid #ccd}figcaption{font-weight:600}</style></head><body><h1>Sidekick Live drawings</h1><p>' +
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sidekick Live drawings</title><style>body{font-family:system-ui,sans-serif;margin:24px;color:#1E2B4A}figure{display:inline-block;margin:8px;width:300px;vertical-align:top}img{width:100%;border:1px solid #ccd}figcaption{font-weight:600}</style></head><body><p style="border:2px solid #B4234F;border-radius:10px;padding:10px 14px;background:#FBE3EA"><strong>🔒 ' + escapeHTML(PII_NOTICE) + '</strong></p><h1>Sidekick Live drawings</h1><p>' +
     escapeHTML(r.lesson + ' · ' + new Date(r.started).toLocaleString()) + ' · saved on this computer only</p>' + parts.join('') + '</body></html>';
   download('sidekick-live-drawings-' + dateStamp() + '.html', html, 'text/html;charset=utf-8');
 }
@@ -2214,7 +2246,7 @@ function renderDotStage(stage, it) {
 function dotsTick(now) {
   if (!H.dotsDirty || now - H.lastDots < 1000) return;
   H.lastDots = now; H.dotsDirty = false;
-  const it = currentItem(); if (!it || it.kind !== 'dots') return;
+  const it = viewItem(); if (!it || it.kind !== 'dots') return;
   if (H.dotPaint) H.dotPaint();
   if (dotState(it).share) broadcast({ t: 'dm', qid: it.id, share: dotShareData(it) });
 }
@@ -2605,6 +2637,7 @@ function wbSend(raw) {
   if (x.syl && x.syl.length > 5) { toast('5 syllables is the most.'); return; }
   wbNewRound(x.target, x.target.length, x.syl, x.parts);
 }
+function wbSendQueued() { const wb = H.wb; if (!wb.queue || wb.qi >= wb.queue.length) return; const w = wb.queue[wb.qi]; wb.qi++; wbSend(w); }
 function wbSetPhase(ph) { const wb = H.wb; wb.phase = ph; if (ph === 'check') wbRecord(); else wb.showAns = false; broadcastView(); renderHostStage(); saveHostSnap(); }
 function wbClearBoards() { const wb = H.wb; wb.boards = {}; wb.counts = {}; wb.cid++; wb.phase = 'build'; wb.showAns = false; broadcastView(); renderHostStage(); saveHostSnap(); toast('Boards cleared.'); }
 function wbCustomize() {
@@ -2641,7 +2674,10 @@ function renderWbStage(stage) {
       : x.target.join(' · ') + '  (' + sounds + ')') + (missing.length ? '  ⚠ not on the board: ' + missing.join(', ') : '');
   };
   inp.addEventListener('input', showPrev);
-  inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); wbSend(inp.value); } });
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (!inp.value.trim() && wb.queue && wb.qi < wb.queue.length) wbSendQueued(); else wbSend(inp.value); } });
+  const q = wb.queue && wb.queue.length ? el('div', { class: 'wb-queue' }, el('span', { class: 'muted' }, 'Word list: '),
+    wb.queue.map((w, i) => el('span', { class: 'wb-qword' + (i < wb.qi ? ' done' : i === wb.qi ? ' next' : '') }, (i < wb.qi ? '✓ ' : '') + w)),
+    wb.qi < wb.queue.length ? el('button', { class: 'btn btn-primary', onclick: wbSendQueued }, '▶ Send next word: ' + wb.queue[wb.qi]) : el('span', { class: 'count-pill' }, 'List done ✓')) : null;
   const tog = (label, key, after) => { const i = el('input', { type: 'checkbox' }); i.checked = wb[key]; i.addEventListener('change', () => { wb[key] = i.checked; const c = wbSettings(); c[key] = i.checked; wbSaveSettings(c); if (after) after(); broadcastView(); saveHostSnap(); }); return el('label', { class: 'check small' }, i, label); };
   const preset = el('select', { 'aria-label': 'Tile board' }, Object.entries(WB_PRESETS).map(([k, p]) => el('option', { value: k }, p.label)));
   preset.value = wb.preset || 'full';
@@ -2654,7 +2690,7 @@ function renderWbStage(stage) {
   const status = wb.round === 0 ? 'Type a word below and press Send. Use / between syllables: car/pet.' : wb.target ? 'Word ' + wb.round + ': ' + (wb.syl ? wb.parts.join(' | ') + '  (' + wbSlices(wb.target, wb.syl).map(g => g.join('·')).join(' | ') + ')' : wb.target.join(' · ')) : 'Free build: ' + wb.n + ' boxes';
   stage.append(el('div', { class: 'q-card wb-host' },
     el('div', { class: 'tag', text: '🔤 Word builder' }), el('div', { class: 'q-text', text: status }),
-    el('div', { class: 'row-inline' }, inp, el('button', { class: 'btn btn-primary', onclick: () => wbSend(inp.value) }, wb.round ? 'Send next word' : 'Send word')), prev,
+    q, el('div', { class: 'row-inline' }, inp, el('button', { class: wb.queue && wb.queue.length ? 'btn' : 'btn btn-primary', onclick: () => wbSend(inp.value) }, wb.round ? 'Send next word' : 'Send word')), prev,
     el('div', { class: 'row-inline wb-actions' },
       wb.round && wb.phase === 'build' ? el('button', { class: 'btn btn-sun', onclick: () => wbSetPhase('check') }, '✓ Check') : null,
       wb.phase === 'check' ? el('button', { class: 'btn', onclick: () => wbSetPhase('build') }, 'Back to building') : null,
@@ -3483,6 +3519,411 @@ function buildRaceView(v) {
 }
 
 /* =====================================================================
+   25. LAUNCH CARDS: lesson items that start a tool with saved settings
+   Launch cards (and items marked "Teacher only") are never shown to students:
+   students keep seeing the last item they were allowed to see.
+   ===================================================================== */
+const LAUNCH_TOOLS = {
+  wb: { icon: '🔤', name: 'Word builder' }, boss: { icon: '👾', name: 'Boss Battle' }, race: { icon: '🤿', name: 'Treasure Dive' },
+  spin: { icon: '🎤', name: 'Share spinner' }, timer: { icon: '⏱', name: 'Timer' }
+};
+function isStudentItem(it) { return !!it && !it.hidden && it.kind !== 'launch'; }
+function viewItem() { return H.spos >= 0 ? H.items[H.spos] || null : null; }
+function inkCast(it, m) { if (!it || !it.hidden) broadcast(m); }
+function launchWords(text) { return String(text || '').split(/[\n,]+/).map(w => cleanText(w, 40).trim().toLowerCase()).filter(Boolean).slice(0, 40); }
+function launchSummary(L) {
+  if (!L) return '';
+  const setName = id => (Sets.get(id) || {}).name || '⚠ question set not found on this computer';
+  switch (L.tool) {
+    case 'wb': return (L.words && L.words.length ? 'Words: ' + L.words.join(' → ') : 'No word list (type words live)') + ' · ' + (L.input === 'type' ? 'typing' : 'tiles') + (L.countStep ? ' · count syllables first' : '') + ' · ' + ((WB_PRESETS[L.preset] || {}).label || 'Full board');
+    case 'boss': return setName(L.setId) + ' · ' + L.n + ' questions · ' + (L.secs ? L.secs + ' s' : 'no timer') + ' · ' + (BOSS_LEVELS[L.level] || {}).label + ' · ' + (BOSSES[L.monster] || {}).name;
+    case 'race': return setName(L.setId) + ' · ' + L.n + ' questions · ' + (L.secs ? L.secs + ' s' : 'no timer') + ' · ' + L.teams + ' teams · events: ' + L.events;
+    case 'spin': return L.prompt ? 'Prompt: “' + L.prompt + '”' : 'No prompt';
+    case 'timer': return fmtTime(L.ms) + (L.stChime ? ' · chime on student devices' : '');
+  }
+  return '';
+}
+
+/* ---------- presenter ---------- */
+function renderLaunchStage(stage, it) {
+  const L = it.launch || {}, t = LAUNCH_TOOLS[L.tool] || { icon: '🚀', name: 'Launch card' }, done = H.launched && H.launched.has(it.id);
+  const busy = (H.wb && H.wb.active) || (H.boss && H.boss.active) || (H.race && H.race.active);
+  stage.append(el('div', { class: 'q-card launch-card' },
+    el('div', { class: 'tag' }, '🚀 Launch card · students don’t see this'),
+    el('div', { class: 'launch-title' }, el('span', { class: 'launch-icon', 'aria-hidden': 'true' }, t.icon), t.name, done ? el('span', { class: 'count-pill' }, '✓ done') : null),
+    el('p', { class: 'muted' }, launchSummary(L)),
+    it.notes ? el('div', { class: 'notes launch-notes' }, it.notes) : null,
+    el('div', { class: 'spin-buttons' },
+      el('button', { class: 'btn btn-sun', disabled: busy, onclick: () => launchStart(it) }, '▶ Start ' + t.name),
+      el('button', { class: 'btn', onclick: () => hostGo(H.pos + 1), disabled: H.pos >= H.items.length - 1 }, 'Skip ▶')),
+    el('p', { class: 'muted' }, 'Students keep seeing ' + (viewItem() ? '“' + itemLabel(viewItem()) + '”' : 'the waiting screen') + ' until you start the tool or move on.')));
+}
+function launchStart(it) {
+  const L = it.launch || {};
+  (H.launched ||= new Set()).add(it.id);
+  if (L.tool === 'wb') {
+    const c = wbSettings(); if (L.preset) c.preset = L.preset; c.input = L.input === 'type' ? 'type' : 'tiles'; c.countStep = !!L.countStep; wbSaveSettings(c);
+    wbStart(); if (H.wb) { H.wb.queue = (L.words || []).slice(); H.wb.qi = 0; renderHostStage(); }
+  } else if (L.tool === 'boss' || L.tool === 'race') {
+    const set = Sets.get(L.setId);
+    if (!set || !set.questions.length) { toast('That question set isn’t on this computer. Import it, then edit this card.'); return; }
+    if (L.tool === 'boss') { if ((H.wb && H.wb.active) || (H.race && H.race.active)) { toast('End the other tool first.'); return; } bossStart({ set, n: L.n, secs: L.secs, level: L.level, monster: L.monster, charge: L.charge !== false, shuffle: L.shuffle !== false }); }
+    else { if ((H.wb && H.wb.active) || (H.boss && H.boss.active)) { toast('End the other tool first.'); return; } raceStart({ theme: 'dive', set, n: L.n, secs: L.secs, teams: L.teams, events: L.events || 'some', shuffle: L.shuffle !== false }); }
+  } else if (L.tool === 'spin') { H.spinPrompt = L.prompt || ''; openSpinner(); }
+  else if (L.tool === 'timer') { setTimer({ total: L.ms, left: L.ms, run: true, at: performance.now(), stChime: !!L.stChime }); toast('Timer started: ' + fmtTime(L.ms)); renderHostStage(); }
+}
+
+/* ---------- lesson builder: make or edit a launch card ---------- */
+function launchModal(item) {
+  const sets = Sets.all().filter(s => s.questions.length);
+  const L = Object.assign({ tool: 'wb', words: [], input: 'tiles', countStep: false, preset: 'full', n: 10, secs: 30, level: 'medium', monster: 'grumble', charge: true, shuffle: true, teams: 3, events: 'some', prompt: '', ms: 120000, stChime: false, setId: sets[0] ? sets[0].id : '' }, item ? item.launch : {});
+  openModal((card, close) => {
+    card.classList.add('wide');
+    const pick = el('div', { class: 'seg', role: 'group', 'aria-label': 'Tool' });
+    const area = el('div', { class: 'launch-fields' });
+    const sel = (label, options, key, num) => { const s = el('select', { 'aria-label': label }, options.map(([v, t]) => el('option', { value: String(v) }, t))); s.value = String(L[key]); s.addEventListener('change', () => { L[key] = num ? +s.value : s.value; }); return el('label', null, label, s); };
+    const chk = (label, key) => { const i = el('input', { type: 'checkbox' }); i.checked = !!L[key]; i.addEventListener('change', () => { L[key] = i.checked; }); return el('label', { class: 'check small' }, i, label); };
+    const setSel = () => sets.length ? sel('Question set', sets.map(s => [s.id, s.name + ' (' + s.questions.length + ')']), 'setId') : el('p', { class: 'error' }, 'Import a question set first (Question sets tab).');
+    const draw = () => {
+      pick.replaceChildren(...Object.entries(LAUNCH_TOOLS).map(([k, t]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(L.tool === k), onclick: () => { L.tool = k; draw(); } }, t.icon + ' ' + t.name)));
+      area.replaceChildren();
+      if (L.tool === 'wb') {
+        const ta = el('textarea', { rows: 5, placeholder: 'One word per line, in chain order:\ncar/pet\nhar/vest\nlan/tern', 'aria-label': 'Word list' }); ta.value = (L.words || []).join('\n');
+        ta.addEventListener('input', () => { L.words = launchWords(ta.value); });
+        area.append(el('label', null, 'Word list (use / between syllables, - between sounds if needed)'), ta,
+          el('div', { class: 'row-inline' }, sel('Students', [['tiles', 'use tiles'], ['type', 'type each syllable']], 'input'),
+            sel('Tile board', Object.entries(WB_PRESETS).map(([k, p]) => [k, p.label]), 'preset')), chk('Ask “How many syllables?” first', 'countStep'));
+      } else if (L.tool === 'boss' || L.tool === 'race') {
+        area.append(setSel(), el('div', { class: 'row-inline' },
+          sel('Questions', [5, 8, 10, 12, 15, 20].map(n => [n, n + ' questions']), 'n', true),
+          sel('Time', [[0, 'No timer'], [20, '20 seconds'], [30, '30 seconds'], [45, '45 seconds'], [60, '1 minute'], [90, '90 seconds']], 'secs', true),
+          L.tool === 'boss' ? sel('Difficulty', Object.entries(BOSS_LEVELS).map(([k, l]) => [k, l.label]), 'level') : sel('Teams', [2, 3, 4, 5, 6].map(n => [n, n + ' teams']), 'teams', true),
+          L.tool === 'boss' ? sel('Boss', Object.entries(BOSSES).map(([k, b]) => [k, b.name]), 'monster') : sel('Surprise events', [['off', 'Off'], ['some', 'Sometimes'], ['often', 'Often']], 'events')),
+          chk('Mix up the question order', 'shuffle'), L.tool === 'boss' ? chk('The boss powers up when fewer than half get it right', 'charge') : null);
+      } else if (L.tool === 'spin') {
+        const p = el('input', { maxlength: 140, placeholder: 'Read your topic sentence on the mic.', 'aria-label': 'Prompt' }); p.value = L.prompt || '';
+        p.addEventListener('input', () => { L.prompt = cleanText(p.value, 140); });
+        area.append(el('label', null, 'What volunteers share (shown on the spinner)'), p, el('p', { class: 'muted' }, 'Starting it opens share sign-up and the spinner.'));
+      } else {
+        const mm = el('input', { type: 'number', min: 0, max: 99, class: 'num', 'aria-label': 'Minutes' }), ss = el('input', { type: 'number', min: 0, max: 59, class: 'num', 'aria-label': 'Seconds' });
+        mm.value = Math.floor(L.ms / 60000); ss.value = Math.round(L.ms % 60000 / 1000);
+        const upd = () => { L.ms = Math.max(5000, ((+mm.value || 0) * 60 + (+ss.value || 0)) * 1000); }; mm.addEventListener('input', upd); ss.addEventListener('input', upd);
+        area.append(el('label', null, 'Length'), el('div', { class: 'row-inline' }, mm, ':', ss), chk('Chime on student devices too', 'stChime'));
+      }
+    };
+    draw();
+    card.append(el('h2', null, item ? 'Edit launch card' : '🚀 Add a launch card'), el('p', { class: 'muted' }, 'A reminder in your lesson that starts a tool with these settings. Students don’t see the card.'), pick, area,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          if ((L.tool === 'boss' || L.tool === 'race') && !Sets.get(L.setId)) { toast('Choose a question set.'); return; }
+          const clean = { tool: L.tool };
+          if (L.tool === 'wb') Object.assign(clean, { words: L.words || [], input: L.input, countStep: !!L.countStep, preset: L.preset });
+          if (L.tool === 'boss') Object.assign(clean, { setId: L.setId, n: L.n, secs: L.secs, level: L.level, monster: L.monster, charge: !!L.charge, shuffle: !!L.shuffle });
+          if (L.tool === 'race') Object.assign(clean, { setId: L.setId, n: L.n, secs: L.secs, teams: L.teams, events: L.events, shuffle: !!L.shuffle });
+          if (L.tool === 'spin') clean.prompt = L.prompt || '';
+          if (L.tool === 'timer') Object.assign(clean, { ms: L.ms, stChime: !!L.stChime });
+          if (item) item.launch = clean; else B.lesson.items.push({ id: uid(), kind: 'launch', launch: clean, notes: '' });
+          card.classList.remove('wide'); saveLessonSoon(); renderBuilder(); close();
+          if (!item) toast('Launch card added at the end. Use ▲ to move it.');
+        } }, item ? 'Save' : 'Add card'),
+        el('button', { class: 'btn btn-ghost', onclick: () => { card.classList.remove('wide'); close(); } }, 'Cancel')));
+  });
+}
+function cleanLaunch(L) {
+  if (!L || !LAUNCH_TOOLS[L.tool]) return null;
+  const n = (v, lo, hi, d) => { v = Math.round(Number(v)); return v >= lo && v <= hi ? v : d; };
+  const o = { tool: L.tool };
+  if (L.tool === 'wb') Object.assign(o, { words: launchWords((L.words || []).join('\n')), input: L.input === 'type' ? 'type' : 'tiles', countStep: !!L.countStep, preset: WB_PRESETS[L.preset] ? L.preset : 'full' });
+  if (L.tool === 'boss' || L.tool === 'race') Object.assign(o, { setId: cleanText(L.setId, 40), n: n(L.n, 1, 30, 10), secs: n(L.secs, 0, 300, 30), shuffle: L.shuffle !== false });
+  if (L.tool === 'boss') Object.assign(o, { level: BOSS_LEVELS[L.level] ? L.level : 'medium', monster: BOSSES[L.monster] ? L.monster : 'grumble', charge: L.charge !== false });
+  if (L.tool === 'race') Object.assign(o, { teams: n(L.teams, 2, 6, 3), events: ['off', 'some', 'often'].includes(L.events) ? L.events : 'some' });
+  if (L.tool === 'spin') o.prompt = cleanText(L.prompt, 140);
+  if (L.tool === 'timer') Object.assign(o, { ms: n(L.ms, 5000, 5940000, 120000), stChime: !!L.stChime });
+  return o;
+}
+
+/* =====================================================================
+   26. TEACHER NOTES: size control and a pop-out window
+   ===================================================================== */
+function applyNotesSize() { document.documentElement.style.setProperty('--notes-size', (settings.notesSize || 1) + 'rem'); }
+function notesSize(d) { settings.notesSize = Math.min(2, Math.max(0.8, Math.round(((settings.notesSize || 1) + d) * 10) / 10)); lsSet(KEYS.settings, settings); applyNotesSize(); updateNotesWin(); }
+let notesWin = null;
+function openNotesWin() {
+  if (notesWin && !notesWin.closed) { notesWin.focus(); return; }
+  notesWin = window.open('', 'sidekick-notes', 'popup,width=560,height=720');
+  if (!notesWin) { toast('Allow pop-ups for this site to open the notes window.'); return; }
+  notesWin.document.title = 'Sidekick Live · Teacher notes';
+  notesWin.document.body.innerHTML = '<style>body{font-family:Lexend,system-ui,sans-serif;margin:0;padding:18px 22px;color:#1E2B4A;background:#F3F7FC}#pos{color:#4A5878;font-weight:600}#now{font-size:1.4rem;font-weight:800;margin:6px 0 10px}#notes{white-space:pre-wrap;background:#fff;border:2px solid #D5E0EE;border-radius:12px;padding:14px 16px;min-height:6em}#next{margin-top:14px;color:#4A5878}.hid{background:#FFF4D6;border-radius:8px;padding:4px 10px;display:inline-block;font-weight:700}</style><div id="pos"></div><div id="now"></div><div id="notes"></div><div id="next"></div>';
+  updateNotesWin();
+}
+function updateNotesWin() {
+  if (!notesWin || notesWin.closed || !H) return;
+  const d = notesWin.document, it = currentItem(), nx = H.items[H.pos + 1];
+  const set = (id, v) => { const e = d.getElementById(id); if (e) e.textContent = v; };
+  set('pos', H.items.length ? 'Item ' + (H.pos + 1) + ' of ' + H.items.length + (it && !isStudentItem(it) ? '  ·  students don’t see this' : '') : '');
+  set('now', (H.wb && H.wb.active) ? '🔤 Word builder' : (H.boss && H.boss.active) ? '👾 Boss Battle' : (H.race && H.race.active) ? '🏁 Team Race' : it ? itemLabel(it) : 'Activities-only session');
+  set('notes', it && it.notes ? it.notes : 'No notes for this item.');
+  set('next', nx ? 'Up next: ' + itemLabel(nx) : 'End of lesson');
+  const n = d.getElementById('notes'); if (n) n.style.fontSize = (settings.notesSize || 1) * 1.25 + 'rem';
+}
+
+/* =====================================================================
+   27. PICTURE PIECES: cut a picture into cards for Picture sort and Picture match
+   A picture activity is a question item: q = { type: 'psort' | 'pmatch', text, pieces:[{id,name}], … }
+   The piece images live on the lesson item (item.pieces[{id, blob, w, h, box}]) and travel like slides.
+   ===================================================================== */
+const PIC_MAX = 360, PIC_LIMIT = 12;
+function picMid(id) { return 'pp-' + id; }
+function picName(q, id) { const p = (q.pieces || []).find(x => x.id === id); return p ? p.name : '?'; }
+function picRight(q, b) { return b && b.p ? picName(q, b.p) : b ? b.w : ''; }
+
+/* ---- question helpers (used by publicQ / grade / answerText / correctText) ---- */
+function picPublic(q, qid) {
+  const p = { qid, type: q.type, text: q.text, read: q.read || '', showNames: !!q.showNames };
+  const face = id => ({ id, mid: picMid(id), name: q.showNames ? picName(q, id) : null, alt: picName(q, id) });
+  if (q.type === 'psort') { p.items = shuffle(q.pieces.map(x => face(x.id))); p.groups = q.groups.slice(); }
+  else {
+    p.lefts = q.pairs.map(pr => face(pr.a));
+    const keys = q.pairs.map(() => uid(6));   // random codes; the key stays on the teacher's computer
+    p.rights = shuffle(q.pairs.map((pr, i) => pr.b.p ? { key: keys[i], ...face(pr.b.p) } : { key: keys[i], word: pr.b.w }));
+    p.keyText = Object.fromEntries(q.pairs.map((pr, i) => [keys[i], pr.b.p ? 'p:' + pr.b.p : 'w:' + pr.b.w]));
+  }
+  p.mids = q.pieces.map(x => picMid(x.id));
+  return p;
+}
+function picGrade(q, a, pub) {
+  if (q.type === 'psort') return q.pieces.every(x => a[x.id] === q.assign[x.id]);
+  const key = k => (pub && pub.keyText ? pub.keyText[k] : null);
+  return q.pairs.every(pr => key(a[pr.a]) === (pr.b.p ? 'p:' + pr.b.p : 'w:' + pr.b.w));
+}
+function picAnswerText(q, a, pub) {
+  if (q.type === 'psort') return q.pieces.map(x => x.name + ' -> ' + (a[x.id] || '?')).join('; ');
+  return q.pairs.map(pr => { const k = a[pr.a], kt = pub && pub.keyText ? pub.keyText[k] : ''; const r = !kt ? '?' : kt[0] === 'p' ? picName(q, kt.slice(2)) : kt.slice(2); return picName(q, pr.a) + ' = ' + r; }).join('; ');
+}
+function picCorrectText(q) {
+  if (q.type === 'psort') return q.pieces.map(x => x.name + ' → ' + q.assign[x.id]).join('; ');
+  return q.pairs.map(pr => picName(q, pr.a) + ' = ' + picRight(q, pr.b)).join('; ');
+}
+
+/* ---- student: picture cards ---- */
+function picFace(p) {
+  const u = mediaUrl(p.mid);
+  return el('span', { class: 'pic-face' },
+    u ? el('img', { src: u, alt: p.alt || 'picture', draggable: 'false' }) : el('span', { class: 'pic-img-loading', 'data-mid': p.mid, 'data-alt': p.alt || 'picture' }, '…'),
+    p.name ? el('span', { class: 'pic-cap' }, p.name) : null);
+}
+function picArrived(mid) {
+  document.querySelectorAll('.pic-img-loading[data-mid="' + mid + '"]').forEach(s => { const u = mediaUrl(mid); if (u) s.replaceWith(el('img', { src: u, alt: s.dataset.alt || 'picture', draggable: 'false' })); });
+}
+function picSortUI(q, mine, locked) {
+  const place = q.items.map(it => (mine && q.groups.includes(mine[it.id])) ? mine[it.id] : null);
+  let sel = null;
+  const wrap = el('div', { class: 'manip pic-manip' });
+  const draw = () => {
+    wrap.replaceChildren();
+    const card = i => cardBtn(picFace(q.items[i]), String(i), sel === i, locked, () => {
+      if (sel !== null && sel !== i && place[sel] !== place[i]) { place[sel] = place[i]; sel = null; } else sel = sel === i ? null : i;
+      draw();
+    }, 'pic-card');
+    const tray = el('div', { class: 'tray', 'data-drop': 'tray', 'aria-label': 'Pictures to sort' });
+    tray.addEventListener('click', () => { if (sel !== null) { place[sel] = null; sel = null; draw(); } });
+    const left = q.items.map((_, i) => i).filter(i => !place[i]);
+    left.forEach(i => tray.append(card(i)));
+    if (!left.length) tray.append(el('span', { class: 'muted' }, locked ? '' : 'All sorted! ✓'));
+    const bins = el('div', { class: 'bins' });
+    q.groups.forEach(g => {
+      const bin = el('div', { class: 'bin' + (sel !== null ? ' ready' : ''), 'data-drop': 'g:' + g },
+        el('button', { class: 'bin-title', type: 'button', disabled: locked, onclick: e => { e.stopPropagation(); if (sel !== null) { place[sel] = g; sel = null; draw(); } } }, g));
+      bin.addEventListener('click', () => { if (sel !== null) { place[sel] = g; sel = null; draw(); } });
+      q.items.forEach((_, i) => { if (place[i] === g) bin.append(card(i)); });
+      bins.append(bin);
+    });
+    wrap.append(tip(locked, sel !== null ? 'Now tap the group where this picture belongs.' : 'Drag each picture into a group — or tap a picture, then tap a group.'), tray, bins);
+  };
+  if (!locked) dragKit(wrap, (c, t) => { const i = +c.dataset.drag; place[i] = t.dataset.drop === 'tray' ? null : t.dataset.drop.slice(2); sel = null; draw(); });
+  draw();
+  return { node: wrap, get: () => { const o = {}; q.items.forEach((it, i) => { o[it.id] = place[i]; }); return o; }, done: () => place.every(Boolean) };
+}
+function picMatchUI(q, mine, locked) {
+  const rights = q.rights, slot = q.lefts.map(() => null);
+  if (mine) q.lefts.forEach((l, i) => { const k = rights.findIndex(r => r.key === mine[l.id]); if (k >= 0) slot[i] = k; });
+  let sel = null;
+  const wrap = el('div', { class: 'manip pic-manip' });
+  const put = (card, i) => { const from = slot.indexOf(card); const prev = slot[i]; if (from >= 0) slot[from] = prev; slot[i] = card; };
+  const face = r => r.word != null ? el('span', { class: 'pic-word' }, r.word) : picFace(r);
+  const draw = () => {
+    wrap.replaceChildren();
+    const card = k => cardBtn(face(rights[k]), String(k), sel === k, locked, () => {
+      const at = x => slot.indexOf(x);
+      if (sel !== null && sel !== k && at(sel) !== at(k)) { if (at(k) >= 0) put(sel, at(k)); else slot[at(sel)] = null; sel = null; } else sel = sel === k ? null : k;
+      draw();
+    }, rights[k].word != null ? 'pic-wordcard' : 'pic-card');
+    const tray = el('div', { class: 'tray', 'data-drop': 'tray', 'aria-label': 'Answer cards' });
+    tray.addEventListener('click', () => { if (sel !== null) { const f = slot.indexOf(sel); if (f >= 0) slot[f] = null; sel = null; draw(); } });
+    const free = rights.map((_, k) => k).filter(k => !slot.includes(k));
+    free.forEach(k => tray.append(card(k)));
+    if (!free.length) tray.append(el('span', { class: 'muted' }, locked ? '' : 'All matched! ✓'));
+    const rows = el('div', { class: 'match-rows' });
+    q.lefts.forEach((l, i) => {
+      const drop = el('div', { class: 'slot' + (sel !== null ? ' ready' : ''), 'data-drop': 's:' + i, role: 'button', tabindex: locked ? null : '0', 'aria-label': 'Match for ' + (l.alt || 'picture ' + (i + 1)) });
+      const tapSlot = () => { if (locked) return; if (sel !== null) { put(sel, i); sel = null; } else if (slot[i] !== null) slot[i] = null; draw(); };
+      drop.addEventListener('click', tapSlot); drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tapSlot(); } });
+      if (slot[i] !== null) drop.append(card(slot[i])); else drop.append(el('span', { class: 'slot-hint' }, locked ? '—' : 'drop here'));
+      rows.append(el('div', { class: 'match-row pic-row' }, el('span', { class: 'left' }, picFace(l)), el('span', { class: 'arrow', 'aria-hidden': 'true' }, '→'), drop));
+    });
+    wrap.append(tip(locked, sel !== null ? 'Now tap the spot where it goes.' : 'Drag each answer next to its picture — or tap an answer, then tap a spot.'), rows, tray);
+  };
+  if (!locked) dragKit(wrap, (c, t) => { const k = +c.dataset.drag; if (t.dataset.drop === 'tray') { const f = slot.indexOf(k); if (f >= 0) slot[f] = null; } else put(k, +t.dataset.drop.slice(2)); sel = null; draw(); });
+  draw();
+  return { node: wrap, get: () => { const o = {}; q.lefts.forEach((l, i) => { o[l.id] = slot[i] !== null ? rights[slot[i]].key : ''; }); return o; }, done: () => slot.every(s => s !== null) };
+}
+
+/* ---- teacher: preview on the presenter ---- */
+function picHostPreview(it, card) {
+  const q = it.q;
+  const img = id => el('figure', { class: 'pic-thumb' }, el('img', { src: H.urls.get(picMid(id)), alt: picName(q, id) }), el('figcaption', null, picName(q, id)));
+  if (q.type === 'psort') card.append(el('div', { class: 'pic-grid' }, q.pieces.map(x => img(x.id))), el('p', { class: 'muted', text: 'Groups: ' + q.groups.join(', ') }));
+  else card.append(el('div', { class: 'pic-grid' }, q.pairs.map(pr => el('div', { class: 'pic-pair' }, img(pr.a), el('span', null, '→'), pr.b.p ? img(pr.b.p) : el('strong', null, pr.b.w)))));
+}
+
+/* ---- lesson builder: the picture cutter ---- */
+async function picCrop(srcBlob, box) {
+  const bmp = await createImageBitmap(srcBlob);
+  const sx = box.x / 10000 * bmp.width, sy = box.y / 10000 * bmp.height, sw = Math.max(4, box.w / 10000 * bmp.width), sh = Math.max(4, box.h / 10000 * bmp.height);
+  const sc = Math.min(1, PIC_MAX / Math.max(sw, sh)), cw = Math.round(sw * sc), ch = Math.round(sh * sc);
+  const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, cw, ch); x.drawImage(bmp, sx, sy, sw, sh, 0, 0, cw, ch);
+  if (bmp.close) bmp.close();
+  let b = await new Promise(r => c.toBlob(r, 'image/webp', 0.82)); if (!b || b.type !== 'image/webp') b = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.85));
+  return { blob: b, w: cw, h: ch };
+}
+function picModal(item) {
+  const slides = B.lesson.items.filter(x => x.kind === 'slide');
+  const q0 = item ? item.q : null;
+  const st = {
+    type: q0 ? q0.type : 'psort', text: q0 ? q0.text : '', showNames: q0 ? !!q0.showNames : false,
+    src: item && item.src ? item.src : null, srcW: item ? item.srcW : 0, srcH: item ? item.srcH : 0,
+    pieces: item ? item.pieces.map(p => ({ id: p.id, name: picName(q0, p.id), box: p.box || null, blob: p.blob, w: p.w, h: p.h })) : [],
+    groups: q0 && q0.groups ? q0.groups.slice() : ['Group 1', 'Group 2'], assign: q0 && q0.assign ? { ...q0.assign } : {},
+    pairs: q0 && q0.pairs ? JSON.parse(JSON.stringify(q0.pairs)) : []
+  };
+  openModal((card, close) => {
+    card.classList.add('wide');
+    const body = el('div', { class: 'pic-editor' });
+    let srcUrl = null;
+    const finish = () => { if (srcUrl) URL.revokeObjectURL(srcUrl); card.classList.remove('wide'); close(); };
+    const draw = () => {
+      body.replaceChildren();
+      // 1. type + prompt
+      const prompt = el('input', { maxlength: 200, placeholder: st.type === 'psort' ? 'Sort the pictures.' : 'Match each picture.' }); prompt.value = st.text;
+      prompt.addEventListener('input', () => { st.text = prompt.value; });
+      const names = el('input', { type: 'checkbox' }); names.checked = st.showNames; names.addEventListener('change', () => { st.showNames = names.checked; });
+      body.append(el('div', { class: 'seg' }, [['psort', '🖼 Picture sort'], ['pmatch', '🖼 Picture match']].map(([v, l]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(st.type === v), onclick: () => { st.type = v; draw(); } }, l))),
+        el('label', null, 'Question'), prompt, el('label', { class: 'check small' }, names, 'Show each piece’s name under its picture'));
+      // 2. picture + boxes
+      const pickSlide = el('select', { 'aria-label': 'Cut pieces from a slide' }, el('option', { value: '' }, 'Cut pieces from a slide…'), slides.map((s, k) => el('option', { value: String(k) }, 'Slide ' + (B.lesson.items.indexOf(s) + 1))));
+      pickSlide.addEventListener('change', () => { if (pickSlide.value === '') return; const s = slides[+pickSlide.value]; st.src = s.blob; st.srcW = s.w; st.srcH = s.h; draw(); });
+      body.append(el('h3', null, 'Pieces'), el('div', { class: 'row-inline' }, pickSlide,
+        fileButton('Cut pieces from a picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height); st.src = r.blob; st.srcW = r.w; st.srcH = r.h; draw(); } catch { toast('Could not read that picture.'); } }),
+        fileButton('＋ Add separate pictures', 'image/*', async files => {
+          for (const f of files) { if (st.pieces.length >= PIC_LIMIT) break; try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height, PIC_MAX, 0.82); st.pieces.push({ id: uid(6), name: f.name.replace(/\.[a-z0-9]+$/i, '').slice(0, 30), box: null, blob: r.blob, w: r.w, h: r.h }); } catch { /* skip */ } }
+          draw();
+        }, true)));
+      if (st.src) {
+        if (srcUrl) URL.revokeObjectURL(srcUrl); srcUrl = URL.createObjectURL(st.src);
+        const ar = st.srcW && st.srcH ? st.srcW / st.srcH : 16 / 9;
+        const frame = el('div', { class: 'draw-frame zone-editor' }); frame.style.aspectRatio = String(ar); frame.style.setProperty('--ar', String(ar));
+        frame.append(el('img', { src: srcUrl, alt: '' }));
+        const c = el('canvas', { class: 'ink-layer active' }); frame.append(c);
+        let drag = null;
+        const paint = extra => paintDotMap(c, { zones: st.pieces.filter(p => p.box).map((p, i) => ({ ...p.box, l: (st.pieces.indexOf(p) + 1) + '. ' + (p.name || '') })).concat(extra ? [extra] : []), pts: [] });
+        c.addEventListener('pointerdown', e => { if (st.pieces.length >= PIC_LIMIT) { toast(PIC_LIMIT + ' pieces is the most.'); return; } e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch { /* ignore */ } const [x, y] = canvasPos(c, e); drag = { x0: x, y0: y }; });
+        c.addEventListener('pointermove', e => { if (!drag) return; const [x, y] = canvasPos(c, e); drag.z = { x: Math.min(x, drag.x0), y: Math.min(y, drag.y0), w: Math.abs(x - drag.x0), h: Math.abs(y - drag.y0), l: '' }; paint(drag.z); });
+        c.addEventListener('pointerup', () => { if (drag && drag.z && drag.z.w > 250 && drag.z.h > 250) st.pieces.push({ id: uid(6), name: '', box: { x: drag.z.x, y: drag.z.y, w: drag.z.w, h: drag.z.h }, blob: null }); drag = null; draw(); });
+        requestAnimationFrame(() => paint());
+        body.append(el('p', { class: 'muted' }, 'Drag a box around each item to cut it out as a picture card.'), frame);
+      }
+      const list = el('div', { class: 'zone-list' });
+      if (!st.pieces.length) list.append(el('p', { class: 'muted' }, 'No pieces yet. Choose a slide or picture and draw boxes, or add separate pictures.'));
+      st.pieces.forEach((p, i) => {
+        const nm = el('input', { maxlength: 30, placeholder: 'Name (read aloud and in your report)', 'aria-label': 'Piece name' }); nm.value = p.name;
+        nm.addEventListener('input', () => { p.name = nm.value; });
+        nm.addEventListener('change', () => drawAnswers());
+        list.append(el('div', { class: 'zone-row' }, el('strong', null, (i + 1) + '.'), nm, el('span', { class: 'muted' }, p.box ? 'cut out' : 'picture'),
+          el('button', { class: 'btn btn-small btn-danger', 'aria-label': 'Delete piece', onclick: () => { st.pieces.splice(i, 1); delete st.assign[p.id]; st.pairs = st.pairs.filter(pr => pr.a !== p.id && !(pr.b && pr.b.p === p.id)); draw(); } }, '✕')));
+      });
+      body.append(list, ans);
+      drawAnswers();
+    };
+    const ans = el('div', { class: 'pic-answers' });
+    function drawAnswers() {
+      ans.replaceChildren();
+      const body = ans;
+      // 3. answers
+      const label = p => (st.pieces.indexOf(p) + 1) + '. ' + (p.name || 'piece');
+      if (st.type === 'psort') {
+        const gi = el('input', { maxlength: 120, placeholder: 'Homophones, Homographs, Homonyms' }); gi.value = st.groups.join(', ');
+        gi.addEventListener('change', () => { st.groups = gi.value.split(',').map(s => cleanText(s, 30).trim()).filter(Boolean).slice(0, 4); drawAnswers(); });
+        body.append(el('h3', null, 'Answers'), el('label', null, 'Groups (2 to 4, separated by commas)'), gi,
+          el('div', { class: 'zone-list' }, st.pieces.map(p => { const s = el('select', { 'aria-label': 'Group for ' + label(p) }, el('option', { value: '' }, 'Choose a group…'), st.groups.map(g => el('option', { value: g }, g))); s.value = st.assign[p.id] || ''; s.addEventListener('change', () => { st.assign[p.id] = s.value; }); return el('div', { class: 'row-inline' }, el('strong', null, label(p)), s); })));
+      } else {
+        const rows = el('div', { class: 'zone-list' });
+        st.pairs.forEach((pr, i) => {
+          const a = el('select', { 'aria-label': 'Picture' }, el('option', { value: '' }, 'Picture…'), st.pieces.map(p => el('option', { value: p.id }, label(p)))); a.value = pr.a || '';
+          a.addEventListener('change', () => { pr.a = a.value; });
+          const kind = el('select', { 'aria-label': 'Matches a' }, el('option', { value: 'w' }, 'matches the word'), el('option', { value: 'p' }, 'matches the picture')); kind.value = pr.b && 'p' in pr.b ? 'p' : 'w';
+          let right;
+          if (kind.value === 'w') { right = el('input', { maxlength: 30, placeholder: 'pair' }); right.value = pr.b && pr.b.w || ''; right.addEventListener('input', () => { pr.b = { w: cleanText(right.value, 30).trim() }; }); }
+          else { right = el('select', { 'aria-label': 'Matching picture' }, el('option', { value: '' }, 'Picture…'), st.pieces.map(p => el('option', { value: p.id }, label(p)))); right.value = pr.b && pr.b.p || ''; right.addEventListener('change', () => { pr.b = { p: right.value }; }); }
+          kind.addEventListener('change', () => { pr.b = kind.value === 'w' ? { w: '' } : { p: '' }; drawAnswers(); });
+          rows.append(el('div', { class: 'row-inline pic-pair-row' }, a, kind, right, el('button', { class: 'btn btn-small btn-danger', 'aria-label': 'Delete pair', onclick: () => { st.pairs.splice(i, 1); drawAnswers(); } }, '✕')));
+        });
+        body.append(el('h3', null, 'Answers (2 to 6 pairs)'), rows, st.pairs.length < 6 ? el('button', { class: 'btn btn-small', onclick: () => { st.pairs.push({ a: '', b: { w: '' } }); drawAnswers(); } }, '＋ Add a pair') : null);
+      }
+    }
+    draw();
+    card.append(el('h2', null, item ? 'Edit picture activity' : '🖼 Add a picture activity'), body,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: async () => {
+          st.pieces.forEach((p, i) => { p.name = cleanText(p.name, 30).trim() || 'Picture ' + (i + 1); });
+          if (st.pieces.length < 2) { toast('Make at least 2 pieces.'); return; }
+          if (new Set(st.pieces.map(p => norm(p.name))).size !== st.pieces.length) { toast('Give each piece a different name.'); return; }
+          let q;
+          if (st.type === 'psort') {
+            if (st.groups.length < 2) { toast('Add 2 to 4 groups.'); return; }
+            if (!st.pieces.every(p => st.groups.includes(st.assign[p.id]))) { toast('Choose a group for every piece.'); return; }
+            q = { type: 'psort', groups: st.groups.slice(), assign: Object.fromEntries(st.pieces.map(p => [p.id, st.assign[p.id]])) };
+          } else {
+            const ok = st.pairs.length >= 2 && st.pairs.every(pr => pr.a && pr.b && (pr.b.w || pr.b.p) && pr.b.p !== pr.a);
+            if (!ok) { toast('Add 2 to 6 complete pairs.'); return; }
+            if (new Set(st.pairs.map(pr => pr.a)).size !== st.pairs.length) { toast('Use each picture on the left only once.'); return; }
+            const used = new Set(st.pairs.flatMap(pr => [pr.a, pr.b.p].filter(Boolean)));
+            st.pieces = st.pieces.filter(p => used.has(p.id));
+            q = { type: 'pmatch', pairs: st.pairs.map(pr => ({ a: pr.a, b: pr.b.p ? { p: pr.b.p } : { w: pr.b.w } })) };
+          }
+          toast('Cutting out the pieces…');
+          for (const p of st.pieces) if (p.box && (!p.blob || p.dirty !== false)) { const r = await picCrop(st.src, p.box); p.blob = r.blob; p.w = r.w; p.h = r.h; }
+          Object.assign(q, { id: q0 ? q0.id : uid(8), text: cleanText(st.text, 200).trim() || (st.type === 'psort' ? 'Sort the pictures.' : 'Match each picture.'), read: '', showNames: st.showNames, pieces: st.pieces.map(p => ({ id: p.id, name: p.name })) });
+          const pieces = st.pieces.map(p => ({ id: p.id, blob: p.blob, w: p.w, h: p.h, box: p.box }));
+          if (item) Object.assign(item, { q, pieces, src: st.src, srcW: st.srcW, srcH: st.srcH });
+          else B.lesson.items.push({ id: uid(), kind: 'q', q, pieces, src: st.src, srcW: st.srcW, srcH: st.srcH, notes: '' });
+          saveLessonSoon(); renderBuilder(); finish();
+          toast(item ? 'Picture activity saved.' : 'Picture activity added at the end. Use ▲ to move it.');
+        } }, item ? 'Save' : 'Add activity'),
+        el('button', { class: 'btn btn-ghost', onclick: finish }, 'Cancel')));
+  });
+}
+function cleanPicQ(q, pieces) {
+  if (!q || !Array.isArray(q.pieces)) return null;
+  const ids = new Set(pieces.map(p => p.id));
+  const out = { id: cleanText(q.id, 20) || uid(8), type: q.type === 'pmatch' ? 'pmatch' : 'psort', text: cleanText(q.text, 200), read: cleanText(q.read, 600), showNames: !!q.showNames,
+    pieces: q.pieces.filter(p => ids.has(p.id)).map(p => ({ id: p.id, name: cleanText(p.name, 30) })) };
+  if (out.type === 'psort') { out.groups = (q.groups || []).map(g => cleanText(g, 30)).slice(0, 4); out.assign = {}; out.pieces.forEach(p => { out.assign[p.id] = cleanText((q.assign || {})[p.id], 30); }); }
+  else out.pairs = (q.pairs || []).slice(0, 6).filter(pr => ids.has(pr.a)).map(pr => ({ a: pr.a, b: pr.b && pr.b.p && ids.has(pr.b.p) ? { p: pr.b.p } : { w: cleanText(pr.b && pr.b.w, 30) } }));
+  return out;
+}
+
+/* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
    ===================================================================== */
 function openTeacher() {
@@ -3573,8 +4014,10 @@ async function exportLesson(l) {
   toast('Preparing lesson file…');
   const items = [];
   for (const it of l.items) {
-    const { blob, img, bg, ...rest } = it;
+    const { blob, img, bg, pieces, src, ...rest } = it;
     if (blob) rest.data = await blobToDataURL(blob);
+    if (pieces) rest.pieces = await Promise.all(pieces.map(async p => ({ id: p.id, w: p.w, h: p.h, box: p.box || null, data: await blobToDataURL(p.blob) })));
+    if (src) rest.srcData = await blobToDataURL(src);
     if (img) rest.imgData = await blobToDataURL(img);
     if (bg) rest.bgData = await blobToDataURL(bg);
     items.push(rest);
@@ -3595,11 +4038,18 @@ async function importLesson(file) {
     if (d.app !== APP || d.kind !== 'lesson' || !Array.isArray(d.items)) throw new Error('This isn’t a Sidekick Live lesson file.');
     const items = [];
     for (const it of d.items.slice(0, 200)) {
-      const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup };
+      const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup, ...(it.hidden && (it.kind === 'slide' || it.kind === 'text') ? { hidden: true } : {}) };
+      if (it.kind === 'launch') { const L = cleanLaunch(it.launch); if (L) items.push({ id: base.id, kind: 'launch', launch: L, notes: base.notes }); continue; }
       if (it.kind === 'slide' && typeof it.data === 'string' && /^data:image\/(webp|jpeg|png);base64,/.test(it.data)) {
         const blob = await (await fetch(it.data)).blob(); items.push({ ...base, kind: 'slide', blob, w: +it.w || 0, h: +it.h || 0 });
       } else if (it.kind === 'text') items.push({ ...base, kind: 'text', title: cleanText(it.title, 120), body: cleanText(it.body, 2000) });
       else if (it.kind === 'check') items.push({ ...base, kind: 'check', prompt: cleanText(it.prompt, 200) });
+      else if (it.kind === 'q' && it.q && (it.q.type === 'psort' || it.q.type === 'pmatch') && Array.isArray(it.pieces)) {
+        const pieces = [];
+        for (const p of it.pieces.slice(0, PIC_LIMIT)) if (okImg(p.data)) pieces.push({ id: cleanText(p.id, 12), w: +p.w || 0, h: +p.h || 0, box: p.box || null, blob: await (await fetch(p.data)).blob() });
+        const q = cleanPicQ(it.q, pieces);
+        if (q) items.push({ ...base, kind: 'q', q, pieces, ...(okImg(it.srcData) ? { src: await (await fetch(it.srcData)).blob(), srcW: +it.srcW || 0, srcH: +it.srcH || 0 } : {}) });
+      }
       else if (it.kind === 'q' && it.q) items.push({ ...base, kind: 'q', q: normalizeQuestion({ ...it.q, question: it.q.text }), signup: !!it.signup,
         ...(okImg(it.imgData) ? { img: await (await fetch(it.imgData)).blob(), imgW: +it.imgW || 0, imgH: +it.imgH || 0 } : {}) });
       else if (it.kind === 'dots') items.push({ ...base, kind: 'dots', prompt: cleanText(it.prompt, 200), showZones: it.showZones !== false, zones: cleanZones(it.zones),
@@ -3716,10 +4166,11 @@ function renderReport() {
   if (!r || !Object.keys(r.students || {}).length) { p.append(el('div', { class: 'empty' }, 'No report yet. Reports appear here after a session with students.')); return; }
   const { detail, summary } = reportRows(r);
   const stamp = dateStamp();
-  p.append(el('h2', null, 'Report: ' + r.lesson), el('p', { class: 'muted', text: 'Started ' + new Date(r.started).toLocaleString() + ' · room ' + r.code + ' · saved on this device only' }),
+  p.append(el('div', { class: 'pii-notice', role: 'note' }, el('strong', null, '🔒 Confidential. '), PII_NOTICE.replace(/^CONFIDENTIAL: /, '')),
+    el('h2', null, 'Report: ' + r.lesson), el('p', { class: 'muted', text: 'Started ' + new Date(r.started).toLocaleString() + ' · room ' + r.code + ' · saved on this device only' }),
     el('div', { class: 'toolbar' },
-      el('button', { class: 'btn btn-primary', onclick: () => download('sidekick-live-answers-' + stamp + '.csv', toCSV(detail)) }, 'Download answers CSV'),
-      el('button', { class: 'btn', onclick: () => download('sidekick-live-summary-' + stamp + '.csv', toCSV(summary)) }, 'Download summary CSV'),
+      el('button', { class: 'btn btn-primary', onclick: () => download('sidekick-live-answers-' + stamp + '.csv', toCSV([[PII_NOTICE], [], ...detail])) }, 'Download answers CSV'),
+      el('button', { class: 'btn', onclick: () => download('sidekick-live-summary-' + stamp + '.csv', toCSV([[PII_NOTICE], [], ...summary])) }, 'Download summary CSV'),
       r.questions.some(q => q.type === 'draw') ? el('button', { class: 'btn', onclick: async () => {
         const lesson = r.lessonId ? await Lessons.get(r.lessonId).catch(() => null) : null;
         downloadDrawings(r.questions.filter(q => q.type === 'draw').map(q => q.qid), r, lesson || { items: [] });
@@ -3772,7 +4223,9 @@ function renderBuilder() {
     if (it.kind === 'slide') thumb = el('img', { class: 'thumb', src: blobUrl(it.blob), alt: 'Slide ' + (i + 1) });
     else if (it.kind === 'draw') thumb = it.bg ? el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.bg), alt: '' }), el('span', null, '✏️ Drawing')) : el('div', { class: 'thumb' }, '✏️ Drawing (blank)');
     else if (it.kind === 'dots') thumb = it.bg ? el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.bg), alt: '' }), el('span', null, '📍 Dot map')) : el('div', { class: 'thumb' }, '📍 Dot map');
+    else if (it.kind === 'q' && it.pieces && it.pieces.length) thumb = el('div', { class: 'thumb thumb-pics' }, it.pieces.slice(0, 4).map(p => el('img', { src: blobUrl(p.blob), alt: '' })));
     else if (it.kind === 'q' && it.img) thumb = el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.img), alt: '' }), el('span', null, '❓ ' + TYPE_LABEL[it.q.type]));
+    else if (it.kind === 'launch') { const t = LAUNCH_TOOLS[(it.launch || {}).tool] || { icon: '🚀', name: 'Launch' }; thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, t.icon), '🚀 ' + t.name); }
     else thumb = el('div', { class: 'thumb' }, { text: '📝 Text slide', q: '❓ ' + TYPE_LABEL[it.q && it.q.type], check: '😀 Check-in' }[it.kind]);
     const fields = el('div', { class: 'bld-fields' });
     const field = (label, key, multi, max) => {
@@ -3780,6 +4233,7 @@ function renderBuilder() {
       inp.addEventListener('input', () => { it[key] = inp.value; saveLessonSoon(); });
       fields.append(el('label', null, label), inp);
     };
+    if (it.kind === 'launch') fields.append(el('div', { class: 'tag' }, '🚀 Launch card · students don’t see it'), el('p', { class: 'muted launch-sum' }, launchSummary(it.launch)), el('div', null, el('button', { class: 'btn btn-small', onclick: () => launchModal(it) }, '⚙ Edit settings')));
     if (it.kind === 'text') { field('Title', 'title', false, 120); field('Text', 'body', true, 2000); }
     if (it.kind === 'check') field('Check-in question', 'prompt', false, 200);
     if (it.kind === 'draw') field('Drawing question (what students should draw or mark)', 'prompt', false, 200);
@@ -3791,7 +4245,8 @@ function renderBuilder() {
     }
     if (it.kind === 'q') {
       fields.append(el('div', null, el('span', { class: 'tag', text: TYPE_LABEL[it.q.type] }), ' ', it.q.text));
-      fields.append(el('div', { class: 'row-inline' }, it.img
+      if (it.q.type === 'psort' || it.q.type === 'pmatch') fields.append(el('div', null, el('button', { class: 'btn btn-small', onclick: () => picModal(it) }, '✂ Edit pieces & answers')));
+      else fields.append(el('div', { class: 'row-inline' }, it.img
         ? el('button', { class: 'btn btn-small', onclick: () => { delete it.img; delete it.imgW; delete it.imgH; saveLessonSoon(); renderBuilder(); } }, 'Remove picture')
         : fileButton('🖼 Add picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height, 960, 0.8); it.img = r.blob; it.imgW = r.w; it.imgH = r.h; saveLessonSoon(); renderBuilder(); } catch { toast('Could not read that picture.'); } })));
     }
@@ -3799,7 +4254,12 @@ function renderBuilder() {
     field('Teacher notes (only you see these)', 'notes', true, 1000);
     const su = el('input', { type: 'checkbox' }); su.checked = !!it.signup;
     su.addEventListener('change', () => { it.signup = su.checked; saveLessonSoon(); });
-    fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
+    if (it.kind !== 'launch') fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
+    if (it.kind === 'slide' || it.kind === 'text') {
+      const hd = el('input', { type: 'checkbox' }); hd.checked = !!it.hidden;
+      hd.addEventListener('change', () => { it.hidden = hd.checked; saveLessonSoon(); renderBuilder(); });
+      fields.append(el('label', { class: 'check small' }, hd, '🙈 Teacher only (students don’t see this)'));
+    }
     const move = (dd) => { const j = i + dd; if (j < 0 || j >= items.length) return; [items[i], items[j]] = [items[j], items[i]]; saveLessonSoon(); renderBuilder(); };
     list.append(el('li', null, thumb, fields, el('div', { class: 'bld-actions' },
       el('button', { class: 'btn btn-small', 'aria-label': 'Move up', disabled: i === 0, onclick: () => move(-1) }, '▲'),
@@ -3982,6 +4442,12 @@ function init() {
   document.querySelectorAll('#tools-tabs .tab').forEach(b => b.addEventListener('click', () => { toolsTab = b.dataset.tool; renderTools(); }));
   $('#bld-add-draw').addEventListener('click', addDrawModal);
   $('#bld-add-dots').addEventListener('click', () => addDotsModal(null));
+  $('#bld-add-launch').addEventListener('click', () => launchModal(null));
+  $('#bld-add-pic').addEventListener('click', () => picModal(null));
+  $('#notes-minus').addEventListener('click', () => notesSize(-0.1));
+  $('#notes-plus').addEventListener('click', () => notesSize(0.1));
+  $('#notes-pop').addEventListener('click', openNotesWin);
+  applyNotesSize();
   $('#h-spin-open').addEventListener('click', openSpinner);
   $('#h-spot-open').addEventListener('click', openSpotlight);
   const copyBtn = el('button', { class: 'btn btn-small', onclick: () => {

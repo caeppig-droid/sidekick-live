@@ -325,6 +325,46 @@ body.safe .sname-list { filter: blur(6px); }
 .tool-race { background: #DDF1FF; }
 body.safe .race-members { filter: blur(6px); }
 
+.pii-notice { background: #FBE3EA; border: 2px solid var(--rose); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; font-size: .92rem; }
+
+/* launch cards, teacher-only items, notes */
+.launch-card { max-width: 46em; }
+.launch-title { display: flex; align-items: center; gap: 12px; font-size: 1.6rem; font-weight: 800; margin: 6px 0; }
+.launch-icon { font-size: 2.2rem; }
+.launch-notes { font-size: var(--notes-size, 1rem); }
+.thumb-launch { display: grid; place-items: center; background: #EFE7FF; font-weight: 700; }
+.thumb-launch .launch-icon { font-size: 1.8rem; display: block; }
+.launch-fields { display: grid; gap: 6px; margin-top: 10px; }
+.launch-fields label { margin: 0; }
+.launch-fields select { width: auto; margin-left: 6px; }
+.hidden-banner { background: #FFF4D6; border: 2px solid var(--sun-deep); border-radius: var(--radius); padding: 6px 12px; font-weight: 700; margin-bottom: 8px; }
+.notes-bar { display: flex; gap: 4px; align-items: center; margin-top: 8px; }
+.notes-bar .muted { margin-right: auto; font-weight: 700; }
+.wb-queue { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 10px; }
+.wb-qword { font-weight: 700; padding: .15em .6em; border-radius: 999px; background: var(--paper); border: 2px solid var(--line); }
+.wb-qword.done { opacity: .55; }
+.wb-qword.next { border-color: var(--sun-deep); background: #FFF4D6; }
+
+/* picture activities */
+.pic-face { display: inline-grid; justify-items: center; gap: 2px; pointer-events: none; }
+.pic-face img { display: block; max-width: clamp(70px, 18vw, 130px); max-height: clamp(70px, 18vw, 120px); border-radius: 8px; -webkit-user-drag: none; user-select: none; }
+.pic-img-loading { display: grid; place-items: center; width: 90px; height: 80px; border-radius: 8px; background: var(--paper); color: var(--ink-soft); font-weight: 800; }
+.pic-cap { font-size: .85rem; font-weight: 700; }
+.card.pic-card { padding: 6px; text-align: center; }
+.card.pic-wordcard { font-size: 1.15rem; }
+.pic-word { font-weight: 800; }
+.pic-row .left { display: flex; justify-content: center; }
+.pic-row .slot { min-height: 96px; justify-content: center; }
+.pic-manip .bin { min-height: 10em; }
+.pic-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.pic-thumb { margin: 0; text-align: center; font-size: .8rem; font-weight: 700; }
+.pic-thumb img { display: block; max-width: 110px; max-height: 90px; border-radius: 8px; border: 1px solid var(--line); }
+.pic-pair { display: flex; align-items: center; gap: 8px; background: var(--paper); border-radius: 10px; padding: 6px 8px; }
+.thumb-pics { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px; }
+.thumb-pics img { width: 100%; height: 100%; object-fit: contain; }
+.pic-editor h3 { margin: 14px 0 4px; }
+.pic-pair-row select, .pic-pair-row input { width: auto; min-height: 38px; }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }
@@ -404,7 +444,7 @@ th { background: var(--paper); position: sticky; top: 0; }
 .side-block > h2 { display: block; }
 .next-preview { font-size: .9rem; color: var(--ink-soft); }
 .next-preview img { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
-.notes { font-size: .9rem; white-space: pre-wrap; background: var(--paper); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+.notes { font-size: var(--notes-size, 1rem); white-space: pre-wrap; background: var(--paper); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
 .notes:empty { display: none; }
 .tools-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .tool { font: inherit; font-size: .88rem; font-weight: 600; min-height: 52px; padding: .4em .5em; border-radius: var(--radius-sm); border: 2px solid var(--line); background: var(--paper); cursor: pointer; color: var(--ink); }
