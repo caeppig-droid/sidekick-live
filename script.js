@@ -75,10 +75,12 @@ function ssDel(k) { try { sessionStorage.removeItem(k); } catch { /* ignore */ }
 const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 function cleanText(s, max = 200) { return String(s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ').slice(0, max); }
 function norm(s) { return String(s ?? '').toLowerCase().replace(/[’‘]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim().replace(/[.!?,;:]+$/, ''); }
-function speak(text) {
-  if (!('speechSynthesis' in window) || !text) return;
+function speak(text, onEnd) {
+  if (!('speechSynthesis' in window) || !text) { if (onEnd) onEnd(); return; }
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text); u.rate = 0.9; speechSynthesis.speak(u);
+  const u = new SpeechSynthesisUtterance(text); u.rate = 0.9;
+  if (onEnd) { u.onend = onEnd; u.onerror = onEnd; }
+  speechSynthesis.speak(u);
 }
 function download(name, text, type = 'text/csv;charset=utf-8') {
   const a = el('a', { href: URL.createObjectURL(new Blob([text], { type })), download: name });
@@ -86,7 +88,19 @@ function download(name, text, type = 'text/csv;charset=utf-8') {
 }
 function dateStamp() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function naturalSort(a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }); }
-function readBtn(fn) { return el('button', { class: 'btn read-btn', type: 'button', onclick: () => speak(fn()) }, '🔊 Read to me'); }
+function readBtn(fn) {
+  // the computer voice: tap to read, tap again to stop
+  const b = el('button', { class: 'btn read-btn', type: 'button', 'aria-pressed': 'false' }, '🔊 Read to me');
+  const reset = () => { b.textContent = '🔊 Read to me'; b.setAttribute('aria-pressed', 'false'); b.dataset.on = ''; };
+  b.addEventListener('click', () => {
+    if (b.dataset.on === '1') { if ('speechSynthesis' in window) speechSynthesis.cancel(); reset(); return; }
+    if (typeof stopClip === 'function') stopClip();
+    document.querySelectorAll('.read-btn[data-on="1"]').forEach(x => { x.textContent = '🔊 Read to me'; x.dataset.on = ''; x.setAttribute('aria-pressed', 'false'); });
+    b.dataset.on = '1'; b.textContent = '⏹ Stop'; b.setAttribute('aria-pressed', 'true');
+    speak(fn(), () => { if (b.dataset.on === '1') reset(); });
+  });
+  return b;
+}
 function makeTicker(ms, fn) {
   // A worker timer keeps ticking even when the tab is in the background.
   try {
@@ -556,6 +570,7 @@ function onHostMsg(m) {
       failJoin(m.why === 'full' ? 'This class is full. Tell your teacher.' : 'Please type your first name and last initial.');
       break;
     case 'view':
+      if (viewKey(S.view) !== viewKey(m)) { if (S.audioMid && m.au !== S.audioMid && m.k !== 'adv') stopClip(); if ('speechSynthesis' in window && S.view && viewKey(S.view) !== viewKey(m)) speechSynthesis.cancel(); }
       S.view = m; if (!m.review) S.reviewIdx = null;
       if (m.k === 'slide') S.ink = { iid: m.sid, strokes: Array.isArray(m.ink) ? m.ink : [] };
       if (S.pendingAns && !(viewQid(m) === S.pendingAns.qid && m.phase === 'open')) S.pendingAns = null;
@@ -952,7 +967,13 @@ async function startHost(lesson, snap) {
   for (const it of H.items) {
     if (it.kind !== 'adv' || it.hidden) continue;
     const A = parseAdventure(it.script, H.items);
-    for (const id of A.order) { const k = A.pages[id].slide; if (!k) continue; const s = H.items[k - 1]; if (!s || s.kind !== 'slide' || !s.blob) continue; const mid = advMid(s); if (H.slideData.has(mid)) continue;
+    for (const id of A.order) { const k = A.pages[id].slide; if (!k) continue; const s = H.items[k - 1];
+      if (s && s.audio && (s.kind === 'slide' || s.kind === 'text') && !H.slideData.has('au-' + s.id)) {   // the linked slide's recording (teacher-only slides too)
+        const ab = new Uint8Array(await s.audio.arrayBuffer());
+        H.slideData.set('au-' + s.id, { buf: ab, size: ab.length, mime: s.audio.type || 'audio/webm', pbuf: null, psize: 0, pmime: '' });
+        H.urls.set('au-' + s.id, URL.createObjectURL(s.audio)); H.mediaIds.push('au-' + s.id);
+      }
+      if (!s || s.kind !== 'slide' || !s.blob) continue; const mid = advMid(s); if (H.slideData.has(mid)) continue;
       const buf = new Uint8Array(await s.blob.arrayBuffer()); let pv = null; try { pv = await makePreview(s.blob); } catch { /* optional */ }
       const pbuf = pv ? new Uint8Array(await pv.arrayBuffer()) : null;
       H.slideData.set(mid, { buf, size: buf.length, mime: s.blob.type || 'image/webp', pbuf, psize: pbuf ? pbuf.length : 0, pmime: pv ? pv.type : '' });
@@ -4224,11 +4245,11 @@ function advPublic(it) {
   const A = advParsed(it), pages = {};
   for (const id of A.order) {
     const p = A.pages[id], t = p.slide ? H.items[p.slide - 1] : null;
-    pages[id] = { id, text: p.text.join('\n'), slide: t && t.kind === 'slide' ? advMid(t) : null,
+    pages[id] = { id, text: p.text.join('\n'), slide: t && t.kind === 'slide' ? advMid(t) : null, au: t && t.audio ? 'au-' + t.id : null,
       slideText: t && t.kind === 'text' ? { title: t.title || '', body: t.body || '' } : null, links: p.links, choices: p.choices.map(c => c.label),
       q: p.q ? { text: p.q.text, options: shuffle(p.q.options) } : null, end: p.end };
   }
-  return (H.advPub[it.id] = { pages, start: A.start, total: A.endings.length, mids: [...new Set(Object.values(pages).map(p => p.slide).filter(Boolean))] });
+  return (H.advPub[it.id] = { pages, start: A.start, total: A.endings.length, mids: [...new Set(Object.values(pages).flatMap(p => [p.slide, p.au]).filter(Boolean))] });
 }
 function advView(base, it, st) {
   const pub = advPublic(it), S2 = advState(it);
@@ -4303,6 +4324,7 @@ function buildAdvView(v) {
   const p = v.pages[st.page], card = el('div', { class: 'q-card adv-card' });
   card.append(el('div', { class: 'adv-title' }, '🗺️ ' + v.title));
   if (p.slide) { const u = mediaUrl(p.slide); card.append(el('div', { class: 'adv-slide' }, u ? el('img', { src: u, alt: 'Slide' }) : el('div', { class: 'slide-loading' }, 'Loading slide…'))); }
+  if (p.au) card.append(listenBtn({ au: p.au }));
   if (p.slideText) card.append(el('div', { class: 'text-slide adv-textslide' }, p.slideText.title ? el('h2', { text: p.slideText.title }) : null, el('p', { text: p.slideText.body })));
   if (p.text) card.append(el('p', { class: 'adv-text', text: p.text }));
   if (prefs.read && (p.text || p.q || p.end)) card.append(readBtn(() => [p.text, p.q && p.q.text, p.q && p.q.options.join(', '), p.end].filter(Boolean).join('. ')));
@@ -4323,6 +4345,9 @@ function buildAdvView(v) {
 function onAdvPage(m) {
   S.adv = S.adv || {};
   const st = S.adv[m.aid] || (S.adv[m.aid] = { page: m.page, found: 0 });
+  const nextPage = S.view && S.view.pages ? S.view.pages[m.page] : null;
+  if (S.audioMid && (!nextPage || nextPage.au !== S.audioMid)) stopClip();
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
   st.page = m.page; st.busy = false; if (m.found != null) st.found = m.found;
   if (m.fb === 'right') toast('✓ Right!'); else if (m.fb === 'wrong') toast('Not quite…');
   if (S.view && S.view.k === 'adv' && S.view.aid === m.aid) renderStudent();
@@ -4379,30 +4404,54 @@ function audioMid(it) { return it && it.audio && isStudentItem(it) ? 'au-' + it.
 function audioItems(items) { return items.filter(it => it.audio && isStudentItem(it) && ['slide', 'text', 'q'].includes(it.kind)); }
 
 /* ---------- student ---------- */
-function playClip(url) {
+function clipEl() {
+  if (!S.audioEl) {
+    const a = S.audioEl = new Audio();
+    ['play', 'pause', 'ended'].forEach(ev => a.addEventListener(ev, refreshListen));
+  }
+  return S.audioEl;
+}
+function clipLabel(mid) {
+  const a = S.audioEl;
+  if (a && S.audioMid === mid && !a.paused && !a.ended) return '⏸ Pause';
+  if (a && S.audioMid === mid && a.paused && !a.ended && a.currentTime > 0.2) return '▶ Keep listening';
+  return '🔊 Listen';
+}
+function refreshListen() {
+  document.querySelectorAll('.listen-btn[data-mid]').forEach(b => { const t = clipLabel(b.dataset.mid); b.textContent = t; b.setAttribute('aria-pressed', String(t.startsWith('⏸'))); });
+}
+function toggleClip(mid) {
+  const u = mediaUrl(mid);
+  if (!u) { toast('Almost ready — try again in a second.'); return; }
+  const a = clipEl();
+  if (S.audioMid === mid && !a.paused && !a.ended) { a.pause(); return; }   // ⏸ Pause
   if ('speechSynthesis' in window) speechSynthesis.cancel();
-  if (!S.audioEl) S.audioEl = new Audio();
-  const a = S.audioEl; a.pause(); a.src = url; a.currentTime = 0;
+  document.querySelectorAll('.read-btn[data-on="1"]').forEach(x => { x.textContent = '🔊 Read to me'; x.dataset.on = ''; });
+  if (S.audioMid !== mid || a.ended) { a.src = u; S.audioMid = mid; }      // 🔊 Listen from the start (▶ Keep listening resumes)
   const p = a.play(); if (p && p.catch) p.catch(() => toast('Tap again to listen.'));
 }
+function stopClip() { if (S.audioEl && !S.audioEl.paused) S.audioEl.pause(); S.audioMid = null; refreshListen(); }
 function listenBtn(v, fallbackText) {
-  if (v.au) return el('button', { class: 'btn read-btn listen-btn', type: 'button', onclick: () => {
-    const u = mediaUrl(v.au);
-    if (!u) { toast('Almost ready — try again in a second.'); return; }
-    playClip(u);
-  } }, '🔊 Listen');
+  if (v.au) { const b = el('button', { class: 'btn read-btn listen-btn', type: 'button', 'data-mid': v.au, onclick: () => toggleClip(v.au) }); b.textContent = clipLabel(v.au); return b; }
   if (prefs.read && fallbackText) return readBtn(() => fallbackText);
   return null;
 }
+/* stop sound when the teacher moves to a different item */
+function viewKey(v) { return v ? [v.k, v.sid, v.q && v.q.qid, v.aid, v.pos, v.r].join('|') : ''; }
 
 /* ---------- teacher: preview on the presenter ---------- */
 function hostListenBtn(it) {
   if (!it || !it.audio) return null;
-  return el('button', { class: 'btn btn-small', type: 'button', onclick: () => {
+  const b = el('button', { class: 'btn btn-small', type: 'button', onclick: () => {
     if (!H.audioEl) H.audioEl = new Audio();
-    const mid = 'au-' + it.id; if (!H.urls.get(mid)) H.urls.set(mid, URL.createObjectURL(it.audio));
-    H.audioEl.src = H.urls.get(mid); H.audioEl.play().catch(() => {});
+    const a = H.audioEl, mid = 'au-' + it.id;
+    if (H.audioMid === mid && !a.paused && !a.ended) { a.pause(); b.textContent = '🔊 Play my recording'; return; }
+    if (!H.urls.get(mid)) H.urls.set(mid, URL.createObjectURL(it.audio));
+    if (H.audioMid !== mid || a.ended) { a.src = H.urls.get(mid); H.audioMid = mid; }
+    a.onended = () => { b.textContent = '🔊 Play my recording'; };
+    a.play().then(() => { b.textContent = '⏸ Pause my recording'; }).catch(() => {});
   } }, '🔊 Play my recording');
+  return b;
 }
 
 /* ---------- lesson builder ---------- */
