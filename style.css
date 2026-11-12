@@ -377,6 +377,28 @@ a.btn { text-decoration: none; }
 .bld-actions .move-to { min-height: 34px; padding: .15em .3em; font-size: .8rem; width: 8.5em; }
 .bld-list > li.just-moved { border-color: var(--sun-deep); box-shadow: 0 0 0 3px #FFE39A; transition: box-shadow .3s; }
 
+/* adventures */
+.adv-card { max-width: 46em; display: grid; gap: 10px; }
+.adv-title { font-weight: 800; color: var(--ink-soft); font-size: .95rem; }
+.adv-slide img { width: 100%; border-radius: var(--radius); border: 2px solid var(--line); display: block; }
+.adv-text { font-size: 1.2rem; white-space: pre-wrap; margin: 0; }
+.adv-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.adv-choices { display: grid; gap: 10px; }
+.adv-choice { font-size: 1.1rem; min-height: 56px; justify-content: flex-start; text-align: left; background: #EEF5FF; border-color: var(--sky-deep); }
+.adv-end { font-size: 1.4rem; font-weight: 800; background: #FFF4D6; border-radius: var(--radius); padding: 12px 16px; }
+.adv-board { max-width: 900px; }
+.adv-counts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
+.adv-roster { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; margin-top: 8px; }
+.adv-row { display: flex; gap: 8px; align-items: center; background: var(--paper); border-radius: 8px; padding: 6px 10px; font-size: .9rem; }
+.adv-row.done { background: #E3F3F1; }
+.adv-row .sname { font-weight: 700; flex: 1; }
+.adv-script { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9rem; min-height: 18em; }
+.adv-check { margin-top: 8px; }
+.adv-map { display: grid; gap: 3px; max-height: 14em; overflow: auto; background: var(--paper); border-radius: 8px; padding: 8px; font-size: .85rem; }
+.adv-map-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.adv-help pre { white-space: pre-wrap; font-size: .82rem; background: var(--paper); padding: 8px; border-radius: 8px; }
+body.safe .adv-roster .sname { filter: blur(6px); }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }

@@ -180,7 +180,7 @@ const TYPE_ALIASES = {
   'match': 'match', 'matching': 'match',
   'sort': 'sort', 'sorting': 'sort', 'categorize': 'sort'
 };
-const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True/False', type: 'Type the answer', wordbank: 'Word bank', order: 'Put in order', match: 'Match', sort: 'Sort', draw: 'Drawing', dots: 'Dot map', wordbuild: 'Word builder', psort: 'Picture sort', pmatch: 'Picture match' };
+const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True/False', type: 'Type the answer', wordbank: 'Word bank', order: 'Put in order', match: 'Match', sort: 'Sort', draw: 'Drawing', dots: 'Dot map', wordbuild: 'Word builder', psort: 'Picture sort', pmatch: 'Picture match', adventure: 'Adventure' };
 function pairs(q) { return q.choices.map(c => { const i = c.indexOf('='); return [c.slice(0, i).trim(), c.slice(i + 1).trim()]; }); }
 function cells(list) { return (list || []).map(x => cleanText(x, 160).trim()).filter(Boolean).slice(0, 6); }
 
@@ -461,7 +461,7 @@ const S = {
   everConnected: false, firstTimer: null, room: '', first: '', initial: '', token: null, id: null, name: '',
   view: null, slides: new Map(), previews: new Map(), deck: [], vol: false, live: null, spot: null, reviewIdx: null,
   lastRx: 0, pendingAns: null, ackQid: null, stars: 0,
-  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0, racePrev: null, raceTimerT: null, handouts: []
+  ink: { iid: null, strokes: [] }, drawDraft: {}, drawTool: { tool: 'pen', color: '#1E2B4A', size: 5 }, timer: null, dotMine: {}, dotPaint: null, wb: null, wbTab: null, game: null, bossHp: null, bossTimerT: null, demo: false, lostAt: 0, racePrev: null, raceTimerT: null, handouts: [], adv: {}
 };
 
 function studentJoin(room, first, initial, token) {
@@ -573,6 +573,7 @@ function onHostMsg(m) {
     case 'pt': showPointer($('#st-stage'), m.x, m.y); break;
     case 'ink': onInkMsg(m); break;
     case 'game': onGameMsg(m); break;
+    case 'advp': onAdvPage(m); break;
     case 'bb': onBossMsg(m); break;
     case 'dm': onDotShare(m); break;
     case 'lz': if (S.view && S.view.k === 'slide' && S.reviewIdx == null) showLaser($('#st-stage'), m); break;
@@ -600,6 +601,7 @@ function onSlideChunk(m) {
     else if (S.slides.get(m.sid)?.url) return;   // full one already here
     const v = S.view;
     if (S.reviewIdx != null && S.deck[S.reviewIdx] === m.sid) { renderStudent(); return; }
+    if (v && v.k === 'adv') { if (v.mids && v.mids.includes(m.sid)) renderStudent(); return; }
     if (viewMedia(v) !== m.sid) return;
     if (v.k === 'q') document.querySelectorAll('[data-mid="' + m.sid + '"]').forEach(b => b.replaceWith(mediaBox(m.sid)));   // keep the student's answer in progress
     else renderStudent();
@@ -650,6 +652,7 @@ function renderStudent() {
       case 'wb': stage.append(buildWordBoard(v)); break;
       case 'boss': stage.append(buildBossView(v)); break;
       case 'handout': stage.append(buildHandoutView(v)); break;
+      case 'adv': stage.append(buildAdvView(v)); break;
       case 'race': stage.append(buildRaceView(v)); break;
       case 'text': {
         const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
@@ -916,7 +919,8 @@ async function startHost(lesson, snap) {
     dotState: snap && snap.dotState ? snap.dotState : {}, dotsDirty: false, lastDots: 0, dotPaint: null,
     wb: snap && snap.wb ? snap.wb : null, wbDirty: false, lastWb: 0,
     spos: snap ? (snap.spos != null ? snap.spos : snap.pos) : -1, launched: new Set(snap && snap.launched ? snap.launched : []), spinPrompt: null,
-    handoutsShown: new Set(snap && snap.handouts ? snap.handouts : []), handoutGot: {}
+    handoutsShown: new Set(snap && snap.handouts ? snap.handouts : []), handoutGot: {},
+    adv: snap && snap.adv ? snap.adv : {}, advPub: {}, advQ: {}, advDirty: false, lastAdv: 0, advPaint: null
   };
   H.report = snap ? (lsGet(KEYS.report, null) || newReport(lesson, H.code)) : newReport(lesson, H.code);
   H.report.lessonId = lesson.id;
@@ -937,6 +941,16 @@ async function startHost(lesson, snap) {
     const mid = picMid(p.id), buf = new Uint8Array(await p.blob.arrayBuffer());
     H.slideData.set(mid, { buf, size: buf.length, mime: p.blob.type || 'image/webp', pbuf: null, psize: 0, pmime: '' });
     H.urls.set(mid, URL.createObjectURL(p.blob)); H.mediaIds.push(mid);
+  }
+  // slides shown inside adventures (teacher-only slides included: they appear only in the adventure)
+  for (const it of H.items) {
+    if (it.kind !== 'adv' || it.hidden) continue;
+    const slides = advSlideItems(H.items), A = parseAdventure(it.script, slides.length);
+    for (const id of A.order) { const k = A.pages[id].slide; if (!k) continue; const s = slides[k - 1], mid = advMid(s); if (!s || !s.blob || H.slideData.has(mid)) continue;
+      const buf = new Uint8Array(await s.blob.arrayBuffer()); let pv = null; try { pv = await makePreview(s.blob); } catch { /* optional */ }
+      const pbuf = pv ? new Uint8Array(await pv.arrayBuffer()) : null;
+      H.slideData.set(mid, { buf, size: buf.length, mime: s.blob.type || 'image/webp', pbuf, psize: pbuf ? pbuf.length : 0, pmime: pv ? pv.type : '' });
+      H.urls.set(mid, URL.createObjectURL(s.blob)); H.mediaIds.push(mid); }
   }
   if (H.timer.total && H.timer.left <= 0) H.timer.total = 0;
   for (const it of H.items) if (it.kind === 'slide' && it.hidden && it.blob) H.urls.set(it.id, URL.createObjectURL(it.blob));   // teacher-only slides: shown to the teacher, never sent
@@ -1061,6 +1075,7 @@ function hostOnData(conn, m) {
     case 'wbb': wbBoardMsg(st, m); break;
     case 'wbc': wbCountMsg(st, m); break;
     case 'hog': handoutGotMsg(st, m); break;
+    case 'adv': advMsg(st, m); break;
   }
 }
 function hostHello(conn, m) {
@@ -1122,6 +1137,7 @@ function viewMsg(st, cache) {
     case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '', ink: H.ink[it.id] || [] };
     case 'dots': return dotsViewMsg(base, it, st);
     case 'handout': return { ...base, k: 'handout', h: handoutInfo(it) };
+    case 'adv': return advView(base, it, st);
     case 'draw': {
       const rec = (H.report.answers[it.id] || {})[st.id];
       return { ...base, k: 'draw', qid: it.id, prompt: it.prompt || '', read: it.read || '', bg: mediaIdFor(it), aspect: drawAspect(it), phase: H.phase[it.id] || 'open', mine: rec ? rec.raw : null };
@@ -1204,6 +1220,7 @@ function hostTick() {
   if (H.timer.total) updateHostTimer();
   dotsTick(now);
   bossTick(now);
+  if (H.advDirty && now - H.lastAdv > 1000) { H.lastAdv = now; H.advDirty = false; if (H.advPaint) H.advPaint(); }
   raceTick(now);
   if (H.wbDirty && now - H.lastWb > 500) { H.lastWb = now; if (H.wb && H.wb.active) renderWbGallery(); else H.wbDirty = false; }
   if (H.galleryDirty && now - H.lastGallery > 1000) { H.lastGallery = now; const it = currentItem(); if (it && it.kind === 'draw') renderGallery(it); else H.galleryDirty = false; }
@@ -1224,7 +1241,7 @@ function hostTick() {
 }
 function bufferedOf(st) { const c = st.conn; const dc = c && c.dataChannel; return (dc ? dc.bufferedAmount : 0) + ((c && c.bufferSize) || 0) * CHUNK; }
 function picPieces(it) { return it && it.kind === 'q' && Array.isArray(it.pieces) && !it.hidden ? it.pieces.filter(p => p.blob) : []; }
-function itemMids(it) { return [mediaIdFor(it), ...picPieces(it).map(p => picMid(p.id))].filter(m => m && H.slideData.has(m)); }
+function itemMids(it) { return [mediaIdFor(it), ...picPieces(it).map(p => picMid(p.id)), ...(it && it.kind === 'adv' && !it.hidden ? advPublic(it).mids : [])].filter(m => m && H.slideData.has(m)); }
 function slideOrder() {
   // current slide first, then forward, then the rest
   if (H._orderPos === H.pos && H._order) return H._order;
@@ -1289,7 +1306,7 @@ function hostGo(pos) {
     H.pos = pos; H.inkCanvas = null; H.dotPaint = null; renderHostStage(); renderHostSide(); saveHostSnap(); return;
   }
   H.spos = pos;
-  H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null;
+  H.pos = pos; H.spotlight = null; H.rx = {}; H.rxDirty = true; H.liveDirty = true; H.inkCanvas = null; H.dotPaint = null; H.advPaint = null;
   const it = currentItem();
   if (it && (it.kind === 'q' || it.kind === 'draw' || it.kind === 'dots')) { if (!H.phase[it.id]) H.phase[it.id] = 'open'; ensureReportQuestion(it); }
   if (it && it.kind === 'handout') H.handoutsShown.add(it.id);
@@ -1317,7 +1334,7 @@ function saveHostSnap() {
       code: H.code, lessonId: H.lesson.id, pos: H.pos, phase: H.phase, review: H.review,
       students: [...H.students.values()].map(s => ({ id: s.id, token: s.token, name: s.name, vol: s.vol, shared: s.shared })),
       manual: H.manual, spin: H.spin, stars: H.stars, goalHit: [...H.goalHit],
-      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], handouts: [...H.handoutsShown], timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
+      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], handouts: [...H.handoutsShown], adv: H.adv, timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
     });
   }, 400);
 }
@@ -1359,6 +1376,7 @@ function itemLabel(it) {
     case 'draw': return 'Drawing: ' + (it.prompt || '');
     case 'dots': return 'Dot map: ' + (it.prompt || '');
     case 'handout': return '📄 Handout: ' + (it.title || '');
+    case 'adv': return '🗺️ Adventure: ' + (it.title || '');
   }
   return '';
 }
@@ -1393,7 +1411,9 @@ function renderHostStage() {
   }
   const it = currentItem();
   if (it && it.hidden) stage.append(el('div', { class: 'hidden-banner', role: 'note' }, '🙈 Teacher only. Students still see: ' + (viewItem() ? itemLabel(viewItem()) : 'the waiting screen')));
-  if (it && it.kind === 'handout') {
+  if (it && it.kind === 'adv') {
+    renderAdvStage(stage, it);
+  } else if (it && it.kind === 'handout') {
     renderHandoutStage(stage, it);
   } else if (it && it.kind === 'launch') {
     renderLaunchStage(stage, it);
@@ -4038,6 +4058,278 @@ function handoutModal(item) {
 }
 
 /* =====================================================================
+   29. ADVENTURES: choose-your-own-path pages, self-paced inside one lesson item
+   Script format (one page per [id]):
+     [start]                      page id (letters, numbers, - and _)
+     Text lines…                  shown on the page
+     SLIDE 3                      show the lesson's 3rd slide on this page
+     LINK Open Notebook | https://…   a link button
+     * Choice label -> pageid     a choice
+     ? Question | right | wrong | wrong   a checkpoint (first answer is right)
+     right -> pageid              where a right answer goes
+     wrong -> pageid              where a wrong answer goes
+     END You found the treasure!  makes this page an ending
+     # comment                    ignored
+   ===================================================================== */
+const ADV_EXAMPLES = {
+  pd: `[start]
+You want to revamp a unit that's coming up. What would you like to do?
+* Create a new portfolio project -> portfolio
+* Create a Nearpod review activity -> nearpod
+* Create materials to support Learning Coaches -> coaches
+
+[portfolio]
+SLIDE 1
+Add your unit's lessons to Notebook as sources, then ask it to draft a portfolio project.
+LINK Open Gemini Notebook | https://notebooklm.google.com
+* Done -> next
+
+[nearpod]
+SLIDE 1
+Ask Notebook for 10 review questions from your unit, then build them in Nearpod.
+* Done -> next
+
+[coaches]
+SLIDE 1
+Ask Notebook for a one-page Learning Coach guide for this unit.
+* Done -> next
+
+[next]
+Great work! What's next?
+* Build a rubric -> rubric
+* Write a family letter -> letter
+* Back to the start -> start
+
+[rubric]
+END Ask Notebook for a 4-level rubric that matches your project.
+
+[letter]
+END Ask Notebook for a short, friendly family letter about the unit.`,
+  student: `[start]
+Coral the mermaid finds an old map. Where should she go?
+* Follow the marlin -> marlin
+* Swim to the reef -> reef
+
+[marlin]
+? Which word is a Hornet Word? | marlin | kitten | sun
+right -> treasure
+wrong -> current
+
+[reef]
+? A Hornet Word has a bossy R. | True | False
+right -> treasure
+wrong -> current
+
+[current]
+A strong current pushes you back! Hint: look for ar, er, ir, or, ur.
+* Try again -> start
+
+[treasure]
+END You found the treasure!`
+};
+function parseAdventure(script, slideCount) {
+  const pages = {}, order = [], errors = [], warnings = [];
+  let cur = null;
+  String(script || '').split(/\r?\n/).forEach((raw, n) => {
+    const line = raw.trim(), ln = 'Line ' + (n + 1) + ': ';
+    if (!line || line.startsWith('#')) return;
+    const head = line.match(/^\[([A-Za-z0-9_-]{1,40})\]$/);
+    if (head) {
+      const id = head[1].toLowerCase();
+      if (pages[id]) errors.push(ln + 'the page [' + id + '] is used twice.');
+      cur = pages[id] = { id, text: [], slide: null, links: [], choices: [], q: null, right: null, wrong: null, end: null };
+      order.push(id); return;
+    }
+    if (!cur) { errors.push(ln + 'start with a page name in brackets, like [start].'); return; }
+    let m;
+    if ((m = line.match(/^SLIDE\s+(\d{1,3})$/i))) { const k = +m[1]; if (!slideCount || k < 1 || k > slideCount) errors.push(ln + 'there is no slide ' + k + ' in this lesson.'); else cur.slide = k; return; }
+    if ((m = line.match(/^LINK\s+(.+?)\s*\|\s*(\S+)$/i))) { if (!/^https:\/\//i.test(m[2])) errors.push(ln + 'links must start with https://'); else cur.links.push({ label: cleanText(m[1], 60), url: m[2] }); return; }
+    if ((m = line.match(/^\*\s*(.+?)\s*->\s*([A-Za-z0-9_-]+)$/))) { cur.choices.push({ label: cleanText(m[1], 80), to: m[2].toLowerCase() }); return; }
+    if ((m = line.match(/^\?\s*(.+)$/))) {
+      const parts = m[1].split('|').map(x => cleanText(x, 120).trim()).filter(Boolean);
+      if (parts.length < 3) errors.push(ln + 'a checkpoint needs a question, the right answer, and at least one wrong answer.');
+      else cur.q = { text: parts[0], answer: parts[1], options: parts.slice(1, 7) };
+      return;
+    }
+    if ((m = line.match(/^right\s*->\s*([A-Za-z0-9_-]+)$/i))) { cur.right = m[1].toLowerCase(); return; }
+    if ((m = line.match(/^wrong\s*->\s*([A-Za-z0-9_-]+)$/i))) { cur.wrong = m[1].toLowerCase(); return; }
+    if ((m = line.match(/^END\b\s*(.*)$/))) { cur.end = cleanText(m[1], 300) || 'The end!'; return; }
+    cur.text.push(cleanText(line, 600));
+  });
+  if (!order.length) errors.push('Add at least one page, starting with [start].');
+  const start = pages.start ? 'start' : order[0];
+  for (const id of order) {
+    const p = pages[id];
+    p.choices.forEach(c => { if (!pages[c.to]) errors.push('[' + id + ']: the choice “' + c.label + '” goes to [' + c.to + '], which doesn’t exist.'); });
+    if (p.q) { if (!p.right || !p.wrong) errors.push('[' + id + ']: a checkpoint needs both “right -> page” and “wrong -> page”.'); [p.right, p.wrong].forEach(t => { if (t && !pages[t]) errors.push('[' + id + ']: [' + t + '] doesn’t exist.'); }); }
+    if (!p.end && !p.choices.length && !p.q) errors.push('[' + id + ']: add a choice (* … -> page), a checkpoint (?), or END.');
+    if (p.end && (p.choices.length || p.q)) warnings.push('[' + id + '] is an ending, so its choices and checkpoint won’t show.');
+  }
+  // which pages can be reached from the start?
+  const seen = new Set(), stack = start ? [start] : [];
+  while (stack.length) { const id = stack.pop(); if (seen.has(id) || !pages[id]) continue; seen.add(id); const p = pages[id]; if (p.end) continue; p.choices.forEach(c => stack.push(c.to)); if (p.q) { stack.push(p.right, p.wrong); } }
+  order.filter(id => !seen.has(id)).forEach(id => warnings.push('[' + id + '] can’t be reached from [' + start + '].'));
+  const endings = order.filter(id => pages[id].end);
+  if (order.length && !endings.length) warnings.push('There is no ending page (END).');
+  return { pages, order, start, errors, warnings, endings, checkpoints: order.filter(id => pages[id].q).length };
+}
+function advSlideItems(items) { return items.filter(x => x.kind === 'slide'); }
+function advMid(slideItem) { return 'av-' + slideItem.id; }
+function advParsed(it) { return parseAdventure(it.script, advSlideItems(H ? H.items : (B ? B.lesson.items : [])).length); }
+
+/* ---------- teacher: session state ---------- */
+function advState(it) {
+  if (!H.adv[it.id]) H.adv[it.id] = { pos: {}, path: {}, endings: {}, checks: {}, done: {} };
+  return H.adv[it.id];
+}
+function advPublic(it) {
+  if (H.advPub[it.id]) return H.advPub[it.id];
+  const A = advParsed(it), slides = advSlideItems(H.items), pages = {};
+  for (const id of A.order) {
+    const p = A.pages[id];
+    pages[id] = { id, text: p.text.join('\n'), slide: p.slide ? advMid(slides[p.slide - 1]) : null, links: p.links, choices: p.choices.map(c => c.label),
+      q: p.q ? { text: p.q.text, options: shuffle(p.q.options) } : null, end: p.end };
+  }
+  return (H.advPub[it.id] = { pages, start: A.start, total: A.endings.length, mids: [...new Set(Object.values(pages).map(p => p.slide).filter(Boolean))] });
+}
+function advView(base, it, st) {
+  const pub = advPublic(it), S2 = advState(it);
+  return { ...base, k: 'adv', aid: it.id, title: it.title || 'Adventure', pages: pub.pages, start: pub.start, total: pub.total, mids: pub.mids,
+    cur: S2.pos[st.id] || pub.start, found: (S2.endings[st.id] || []).length };
+}
+function advMsg(st, m) {
+  const it = viewItem(); if (!it || it.kind !== 'adv' || m.aid !== it.id) return;
+  const A = advParsed(it), S2 = advState(it), pub = advPublic(it);
+  const here = S2.pos[st.id] || A.start, p = A.pages[here]; if (!p) return;
+  let next = null, fb = null;
+  if (m.op === 'restart') next = A.start;
+  else if (m.page !== here) { send(st, { t: 'advp', aid: it.id, page: here }); return; }   // out of step: resync
+  else if (m.op === 'go' && Number.isInteger(m.i) && p.choices[m.i]) next = p.choices[m.i].to;
+  else if (m.op === 'ans' && p.q && typeof m.a === 'string') {
+    const ok = norm(m.a) === norm(p.q.answer); fb = ok ? 'right' : 'wrong'; next = ok ? p.right : p.wrong;
+    (S2.checks[st.id] ||= []).push({ page: here, a: cleanText(m.a, 120), ok });
+  }
+  if (!next || !A.pages[next]) return;
+  S2.pos[st.id] = next; (S2.path[st.id] ||= [A.start]).push(next);
+  if (A.pages[next].end) { const e = (S2.endings[st.id] ||= []); if (!e.includes(next)) e.push(next); S2.done[st.id] = true; }
+  send(st, { t: 'advp', aid: it.id, page: next, fb, found: (S2.endings[st.id] || []).length, total: pub.total });
+  advRecord(it); H.advDirty = true;
+}
+function advRecord(it) {
+  const A = advParsed(it), S2 = advState(it);
+  let qid = H.advQ[it.id];
+  if (!qid) {
+    qid = H.advQ[it.id] = it.id;
+    if (!H.report.questions.some(q => q.qid === qid)) {
+      H.report.advCount = (H.report.advCount || 0) + 1;
+      H.report.questions.push({ qid, n: 4000 + H.report.advCount, label: 'A' + H.report.advCount, type: 'adventure', text: it.title || 'Adventure', graded: false });
+    }
+  }
+  const ans = H.report.answers[qid] = {};
+  for (const [sid, path] of Object.entries(S2.path)) {
+    if (isDemoId(sid)) continue;
+    const ch = S2.checks[sid] || [], right = ch.filter(c => c.ok).length;
+    ans[sid] = { raw: null, a: path.join(' → ') + (A.checkpoints ? '  · checkpoints ' + right + '/' + ch.length : '') + (S2.done[sid] ? '  · finished' : ''), correct: null, t: Date.now() };
+  }
+  H.reportDirty = true;
+}
+function renderAdvStage(stage, it) {
+  const A = advParsed(it), S2 = advState(it);
+  const first = A.pages[A.start];
+  const box = el('div', { class: 'q-card adv-board' }, el('div', { class: 'tag' }, '🗺️ Adventure'), el('div', { class: 'q-text', text: it.title || 'Adventure' }), el('div', { id: 'adv-live' }));
+  stage.append(box);
+  if (A.errors.length) box.append(el('p', { class: 'error' }, '⚠ This adventure has problems. Fix them in the lesson builder: ' + A.errors[0]));
+  H.advPaint = () => {
+    const live = $('#adv-live'); if (!live) return;
+    const on = onlineStudents();   // counted fresh, so late joiners show up
+    const done = on.filter(s => S2.done[s.id]).length;
+    const counts = first && first.choices.length ? first.choices.map(c => ({ label: c.label, n: on.filter(s => (S2.path[s.id] || [])[1] === c.to).length })) : [];
+    live.replaceChildren(
+      el('p', { class: 'count-pill' }, done + ' of ' + on.length + ' reached an ending'),
+      counts.length ? el('div', { class: 'adv-counts' }, el('strong', null, 'First choice: '), counts.map(c => el('span', { class: 'count-pill' }, c.label + ': ' + c.n))) : null,
+      el('div', { class: 'adv-roster' }, on.sort((a, b) => naturalSort(a.name, b.name)).map(s => {
+        const pg = S2.pos[s.id] || A.start, ch = S2.checks[s.id] || [];
+        return el('div', { class: 'adv-row' + (S2.done[s.id] ? ' done' : '') }, el('span', { class: 'sname', text: s.name }),
+          el('span', { class: 'muted' }, '[' + pg + ']'), ch.length ? el('span', null, '✓ ' + ch.filter(c => c.ok).length + '/' + ch.length) : null,
+          S2.done[s.id] ? el('span', null, '🏁') : null);
+      })));
+  };
+  H.advPaint();
+}
+
+/* ---------- student ---------- */
+function buildAdvView(v) {
+  S.adv = S.adv || {};
+  const st = S.adv[v.aid] || (S.adv[v.aid] = { page: v.cur, found: v.found, busy: false });
+  if (!v.pages[st.page]) st.page = v.start;
+  const p = v.pages[st.page], card = el('div', { class: 'q-card adv-card' });
+  card.append(el('div', { class: 'adv-title' }, '🗺️ ' + v.title));
+  if (p.slide) { const u = mediaUrl(p.slide); card.append(el('div', { class: 'adv-slide' }, u ? el('img', { src: u, alt: 'Slide' }) : el('div', { class: 'slide-loading' }, 'Loading slide…'))); }
+  if (p.text) card.append(el('p', { class: 'adv-text', text: p.text }));
+  if (prefs.read && (p.text || p.q || p.end)) card.append(readBtn(() => [p.text, p.q && p.q.text, p.q && p.q.options.join(', '), p.end].filter(Boolean).join('. ')));
+  if (p.links.length) card.append(el('div', { class: 'adv-links' }, p.links.map(l => el('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, '🔗 ' + l.label))));
+  const act = (msg) => { if (st.busy) return; st.busy = true; if (!sendHost({ ...msg, t: 'adv', aid: v.aid, page: st.page })) { st.busy = false; toast('Not connected yet — try again in a moment.'); return; } setTimeout(() => { if (st.busy) { st.busy = false; renderStudent(); } }, 6000); renderStudent(); };
+  if (p.end) {
+    card.append(el('div', { class: 'adv-end' }, '🏁 ' + p.end),
+      el('p', { class: 'muted' }, 'You’ve found ' + st.found + ' of ' + v.total + ' ending' + (v.total === 1 ? '' : 's') + '.'),
+      el('button', { class: 'btn btn-primary', type: 'button', disabled: st.busy, onclick: () => act({ op: 'restart' }) }, '▶ Play again'));
+  } else if (p.q) {
+    card.append(el('div', { class: 'q-text', text: p.q.text }),
+      el('div', { class: 'choice-grid' }, p.q.options.map(o => el('button', { class: 'choice', type: 'button', disabled: st.busy, onclick: () => act({ op: 'ans', a: o }) }, o))));
+  } else {
+    card.append(el('div', { class: 'adv-choices' }, p.choices.map((c, i) => el('button', { class: 'btn adv-choice', type: 'button', disabled: st.busy, onclick: () => act({ op: 'go', i }) }, c))));
+  }
+  return card;
+}
+function onAdvPage(m) {
+  S.adv = S.adv || {};
+  const st = S.adv[m.aid] || (S.adv[m.aid] = { page: m.page, found: 0 });
+  st.page = m.page; st.busy = false; if (m.found != null) st.found = m.found;
+  if (m.fb === 'right') toast('✓ Right!'); else if (m.fb === 'wrong') toast('Not quite…');
+  if (S.view && S.view.k === 'adv' && S.view.aid === m.aid) renderStudent();
+}
+
+/* ---------- lesson builder: the adventure editor ---------- */
+function advModal(item) {
+  const slideCount = advSlideItems(B.lesson.items).length;
+  openModal((card, close) => {
+    card.classList.add('wide');
+    const title = el('input', { maxlength: 80, placeholder: 'Revamp a unit with Notebook' }); title.value = item ? item.title : '';
+    const ta = el('textarea', { rows: 16, class: 'adv-script', spellcheck: 'false', 'aria-label': 'Adventure script' }); ta.value = item ? item.script : '';
+    const report = el('div', { class: 'adv-check', 'aria-live': 'polite' });
+    const check = () => {
+      const A = parseAdventure(ta.value, slideCount);
+      report.replaceChildren(
+        el('p', null, el('strong', null, A.order.length + ' pages · ' + A.endings.length + ' ending' + (A.endings.length === 1 ? '' : 's') + ' · ' + A.checkpoints + ' checkpoint' + (A.checkpoints === 1 ? '' : 's')), A.errors.length ? '' : '  ✓ Ready'),
+        A.errors.length ? el('ul', { class: 'error' }, A.errors.slice(0, 8).map(e => el('li', { text: e }))) : null,
+        A.warnings.length ? el('ul', { class: 'muted' }, A.warnings.slice(0, 6).map(w => el('li', { text: '⚠ ' + w }))) : null,
+        el('div', { class: 'adv-map' }, A.order.map(id => { const p = A.pages[id]; const to = p.end ? ['🏁 end'] : [...p.choices.map(c => c.to), ...(p.q ? ['✓ ' + p.right, '✗ ' + p.wrong] : [])]; return el('div', { class: 'adv-map-row' }, el('code', null, '[' + id + ']'), p.slide ? el('span', { class: 'tag' }, 'slide ' + p.slide) : null, p.q ? el('span', { class: 'tag' }, '?') : null, el('span', { class: 'muted' }, '→ ' + to.join(', '))); })));
+      return A;
+    };
+    ta.addEventListener('input', check);
+    card.append(el('h2', null, item ? 'Edit adventure' : '🗺️ Add an adventure'), el('label', null, 'Title'), title,
+      el('div', { class: 'row-inline' }, el('label', null, 'Script'), el('button', { class: 'btn btn-small', type: 'button', onclick: () => { ta.value = ADV_EXAMPLES.student; check(); } }, 'Insert student example'),
+        el('button', { class: 'btn btn-small', type: 'button', onclick: () => { ta.value = ADV_EXAMPLES.pd; check(); } }, 'Insert PD example')),
+      ta,
+      el('details', { class: 'adv-help' }, el('summary', null, 'How to write a script'),
+        el('pre', null, '[start]            a page (letters, numbers, - and _)\nText…              what the page says\nSLIDE 3            show the lesson’s 3rd slide (teacher-only slides work too)\nLINK Label | https://…   a link button\n* Choice -> page   a choice button\n? Question | right answer | wrong | wrong   a checkpoint\nright -> page      where a right answer goes\nwrong -> page      where a wrong answer goes\nEND Message        an ending')),
+      report,
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          const A = check();
+          if (A.errors.length) { toast('Fix the problems listed first.'); return; }
+          const t = cleanText(title.value, 80).trim() || 'Adventure', script = String(ta.value).slice(0, 20000);
+          if (item) Object.assign(item, { title: t, script });
+          else B.lesson.items.push({ id: uid(), kind: 'adv', title: t, script, notes: '' });
+          card.classList.remove('wide'); saveLessonSoon(); renderBuilder(); close();
+          if (!item) toast('Adventure added at the end. Use Move to… to place it.');
+        } }, item ? 'Save' : 'Add adventure'),
+        el('button', { class: 'btn btn-ghost', onclick: () => { card.classList.remove('wide'); close(); } }, 'Cancel')));
+    check();
+  });
+}
+
+/* =====================================================================
    11. TEACHER MODE: PIN, DASHBOARD
    ===================================================================== */
 function openTeacher() {
@@ -4154,6 +4446,7 @@ async function importLesson(file) {
     const items = [];
     for (const it of d.items.slice(0, 200)) {
       const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup, ...(it.hidden && (it.kind === 'slide' || it.kind === 'text' || it.kind === 'handout') ? { hidden: true } : {}) };
+      if (it.kind === 'adv') { items.push({ id: base.id, kind: 'adv', title: cleanText(it.title, 80) || 'Adventure', script: String(it.script || '').slice(0, 20000), notes: base.notes }); continue; }
       if (it.kind === 'handout') {
         const link = typeof it.link === 'string' && handoutLinkOk(it.link) ? it.link : '';
         let file = null; if (typeof it.fileData === 'string' && /^data:[\w.+-]+\/[\w.+-]+;base64,/.test(it.fileData)) { file = await (await fetch(it.fileData)).blob(); if (file.size > HANDOUT_MAX) file = null; }
@@ -4346,6 +4639,7 @@ function renderBuilder() {
     else if (it.kind === 'dots') thumb = it.bg ? el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.bg), alt: '' }), el('span', null, '📍 Dot map')) : el('div', { class: 'thumb' }, '📍 Dot map');
     else if (it.kind === 'q' && it.pieces && it.pieces.length) thumb = el('div', { class: 'thumb thumb-pics' }, it.pieces.slice(0, 4).map(p => el('img', { src: blobUrl(p.blob), alt: '' })));
     else if (it.kind === 'q' && it.img) thumb = el('div', { class: 'thumb thumb-draw' }, el('img', { src: blobUrl(it.img), alt: '' }), el('span', null, '❓ ' + TYPE_LABEL[it.q.type]));
+    else if (it.kind === 'adv') thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, '🗺️'), 'Adventure');
     else if (it.kind === 'handout') thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, '📄'), 'Handout');
     else if (it.kind === 'launch') { const t = LAUNCH_TOOLS[(it.launch || {}).tool] || { icon: '🚀', name: 'Launch' }; thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, t.icon), '🚀 ' + t.name); }
     else thumb = el('div', { class: 'thumb' }, { text: '📝 Text slide', q: '❓ ' + TYPE_LABEL[it.q && it.q.type], check: '😀 Check-in' }[it.kind]);
@@ -4355,6 +4649,9 @@ function renderBuilder() {
       inp.addEventListener('input', () => { it[key] = inp.value; saveLessonSoon(); });
       fields.append(el('label', null, label), inp);
     };
+    if (it.kind === 'adv') { const A = parseAdventure(it.script, items.filter(x => x.kind === 'slide').length); fields.append(el('div', { class: 'tag' }, '🗺️ Adventure'), el('div', null, el('strong', null, it.title)),
+      el('p', { class: 'muted launch-sum' }, A.order.length + ' pages · ' + A.endings.length + ' endings · ' + A.checkpoints + ' checkpoints' + (A.errors.length ? '  ⚠ ' + A.errors.length + ' problem' + (A.errors.length === 1 ? '' : 's') : '')),
+      el('div', null, el('button', { class: 'btn btn-small', onclick: () => advModal(it) }, '✎ Edit adventure'))); }
     if (it.kind === 'handout') fields.append(el('div', { class: 'tag' }, '📄 Handout'), el('div', null, el('strong', null, it.title || 'Handout')),
       el('p', { class: 'muted launch-sum' }, it.file ? (it.fileName || 'file') + ' · ' + fmtSize(it.file.size) : it.link ? 'Link: ' + it.link : 'No file yet'),
       el('div', null, el('button', { class: 'btn btn-small', onclick: () => handoutModal(it) }, '✎ Edit handout')));
@@ -4379,7 +4676,7 @@ function renderBuilder() {
     field('Teacher notes (only you see these)', 'notes', true, 1000);
     const su = el('input', { type: 'checkbox' }); su.checked = !!it.signup;
     su.addEventListener('change', () => { it.signup = su.checked; saveLessonSoon(); });
-    if (it.kind !== 'launch' && it.kind !== 'handout') fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
+    if (it.kind !== 'launch' && it.kind !== 'handout' && it.kind !== 'adv') fields.append(el('label', { class: 'check small' }, su, '✋ Open share sign-up when I get here'));
     if (it.kind === 'slide' || it.kind === 'text' || it.kind === 'handout') {
       const hd = el('input', { type: 'checkbox' }); hd.checked = !!it.hidden;
       hd.addEventListener('change', () => { it.hidden = hd.checked; saveLessonSoon(); renderBuilder(); });
@@ -4590,6 +4887,7 @@ function init() {
   $('#bld-add-launch').addEventListener('click', () => launchModal(null));
   $('#bld-add-pic').addEventListener('click', () => picModal(null));
   $('#bld-add-handout').addEventListener('click', () => handoutModal(null));
+  $('#bld-add-adv').addEventListener('click', () => advModal(null));
   $('#st-handouts').addEventListener('click', openHandouts);
   $('#notes-minus').addEventListener('click', () => notesSize(-0.1));
   $('#notes-plus').addEventListener('click', () => notesSize(0.1));
