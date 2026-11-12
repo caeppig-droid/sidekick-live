@@ -399,6 +399,14 @@ a.btn { text-decoration: none; }
 .adv-help pre { white-space: pre-wrap; font-size: .82rem; background: var(--paper); padding: 8px; border-radius: 8px; }
 body.safe .adv-roster .sname { filter: blur(6px); }
 
+.audio-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: #F4F0FF; border-radius: 8px; padding: 6px 8px; }
+.audio-row audio { height: 34px; max-width: 220px; }
+.listen-btn { background: #F4F0FF; border-color: #B9A6F2; font-size: 1.05rem; }
+.rec-status { font-size: 1.2rem; font-weight: 700; margin: 10px 0; min-height: 1.6em; }
+
+.adv-textslide { max-width: none; }
+.adv-slidelist { margin: 4px 0; font-weight: 600; }
+
 /* charts */
 .chart { display: grid; gap: 8px; margin-top: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(6em, 30%) 1fr 3em; gap: 10px; align-items: center; }

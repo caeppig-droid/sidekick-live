@@ -596,6 +596,7 @@ function onSlideChunk(m) {
   s.buf.set(d, m.o); s.got = Math.max(s.got, m.o + d.length);
   if (s.got >= s.size) {
     s.url = URL.createObjectURL(new Blob([s.buf], { type: s.mime })); s.buf = null;
+    if (m.sid.startsWith('au-')) return;   // a read-aloud recording: ready for the Listen button
     if (!m.p && m.sid.startsWith('pp-')) { picArrived(m.sid); return; }
     if (!m.p) { const pv = S.previews.get(m.sid); if (pv && pv.url) { setTimeout(() => URL.revokeObjectURL(pv.url), 5000); S.previews.delete(m.sid); } }
     else if (S.slides.get(m.sid)?.url) return;   // full one already here
@@ -644,7 +645,7 @@ function renderStudent() {
       case 'slide': {
         const fr = slideEl(v.sid, v.read); stage.append(fr);
         if (fr.querySelector('img')) attachStudentInk(fr);
-        if (prefs.read && v.read) stage.append(readBtn(() => v.read));
+        { const lb = listenBtn(v, v.read); if (lb) stage.append(lb); }
         break;
       }
       case 'draw': stage.append(buildDrawResponse(v)); break;
@@ -657,7 +658,7 @@ function renderStudent() {
       case 'text': {
         const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
         stage.append(card);
-        if (prefs.read) stage.append(readBtn(() => v.read || ((v.title || '') + '. ' + (v.body || ''))));
+        { const lb = listenBtn(v, v.read || ((v.title || '') + '. ' + (v.body || ''))); if (lb) stage.append(lb); }
         break;
       }
       case 'q': stage.append(buildStudentQ(v)); break;
@@ -718,7 +719,7 @@ function buildStudentQ(v) {
   const card = el('div', { class: 'q-card' });
   card.append(el('div', { class: 'q-text', text: q.type === 'wordbank' ? 'Fill in the blanks.' : q.text }));
   if (q.img) card.append(mediaBox(q.img));
-  if (prefs.read) card.append(readBtn(() => q.read || speakableQ(q)));
+  { const lb = listenBtn(v, q.read || speakableQ(q)); if (lb) card.append(lb); }
   const body = el('div'); card.append(body);
   let getAnswer = () => null, complete = () => false;
   const mine = v.mine;
@@ -820,7 +821,7 @@ function studentSpin(m) {
     const b = el('button', { class: 'vol-toggle', 'aria-pressed': String(S.vol), onclick: () => { toggleVol(); b.setAttribute('aria-pressed', String(S.vol)); } },
       el('span', { class: 'vol-box', 'aria-hidden': 'true' }), el('span', null, 'I’d like to share on the mic 🎤'));
     $('#spin-title').textContent = m.prompt ? '🎤 ' + cleanText(m.prompt, 140) : 'Share spinner';
-    res.replaceChildren(el('span', { class: 'sub' }, 'The share spinner is open.'), S.view && S.view.signup ? b : null);
+    res.replaceChildren(...[el('span', { class: 'sub' }, 'The share spinner is open.'), S.view && S.view.signup ? b : null].filter(Boolean));
   } else if (m.ph === 'skip') {
     res.replaceChildren(el('span', { class: 'sub' }, 'Let’s spin again!'));
   }
@@ -942,11 +943,16 @@ async function startHost(lesson, snap) {
     H.slideData.set(mid, { buf, size: buf.length, mime: p.blob.type || 'image/webp', pbuf: null, psize: 0, pmime: '' });
     H.urls.set(mid, URL.createObjectURL(p.blob)); H.mediaIds.push(mid);
   }
+  for (const it of audioItems(H.items)) {   // teacher read-aloud recordings
+    const mid = 'au-' + it.id, buf = new Uint8Array(await it.audio.arrayBuffer());
+    H.slideData.set(mid, { buf, size: buf.length, mime: it.audio.type || 'audio/webm', pbuf: null, psize: 0, pmime: '' });
+    H.urls.set(mid, URL.createObjectURL(it.audio)); H.mediaIds.push(mid);
+  }
   // slides shown inside adventures (teacher-only slides included: they appear only in the adventure)
   for (const it of H.items) {
     if (it.kind !== 'adv' || it.hidden) continue;
-    const slides = advSlideItems(H.items), A = parseAdventure(it.script, slides.length);
-    for (const id of A.order) { const k = A.pages[id].slide; if (!k) continue; const s = slides[k - 1], mid = advMid(s); if (!s || !s.blob || H.slideData.has(mid)) continue;
+    const A = parseAdventure(it.script, H.items);
+    for (const id of A.order) { const k = A.pages[id].slide; if (!k) continue; const s = H.items[k - 1]; if (!s || s.kind !== 'slide' || !s.blob) continue; const mid = advMid(s); if (H.slideData.has(mid)) continue;
       const buf = new Uint8Array(await s.blob.arrayBuffer()); let pv = null; try { pv = await makePreview(s.blob); } catch { /* optional */ }
       const pbuf = pv ? new Uint8Array(await pv.arrayBuffer()) : null;
       H.slideData.set(mid, { buf, size: buf.length, mime: s.blob.type || 'image/webp', pbuf, psize: pbuf ? pbuf.length : 0, pmime: pv ? pv.type : '' });
@@ -1134,7 +1140,7 @@ function viewMsg(st, cache) {
   const it = viewItem();
   if (!it) return { ...base, k: 'wait' };
   switch (it.kind) {
-    case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '', ink: H.ink[it.id] || [] };
+    case 'slide': return { ...base, k: 'slide', sid: it.id, read: it.read || '', ink: H.ink[it.id] || [], au: audioMid(it) };
     case 'dots': return dotsViewMsg(base, it, st);
     case 'handout': return { ...base, k: 'handout', h: handoutInfo(it) };
     case 'adv': return advView(base, it, st);
@@ -1142,13 +1148,13 @@ function viewMsg(st, cache) {
       const rec = (H.report.answers[it.id] || {})[st.id];
       return { ...base, k: 'draw', qid: it.id, prompt: it.prompt || '', read: it.read || '', bg: mediaIdFor(it), aspect: drawAspect(it), phase: H.phase[it.id] || 'open', mine: rec ? rec.raw : null };
     }
-    case 'text': return { ...base, k: 'text', title: it.title || '', body: it.body || '', read: it.read || '' };
+    case 'text': return { ...base, k: 'text', title: it.title || '', body: it.body || '', read: it.read || '', au: audioMid(it) };
     case 'check': { const c = H.report.checkins[it.id]; return { ...base, k: 'check', iid: it.id, prompt: it.prompt || '', mine: c && c.votes[st.id] || null }; }
     case 'q': {
       const ph = H.phase[it.id] || 'open', rec = (H.report.answers[it.id] || {})[st.id];
       const pub = getPub(it);
       let sendQ = pub; if (pub.keyText) { const { keyText, ...rest } = pub; sendQ = rest; }   // the answer key stays on the teacher's computer
-      const v = { ...base, k: 'q', q: sendQ, phase: ph, mine: rec ? rec.raw : null };
+      const v = { ...base, k: 'q', q: sendQ, phase: ph, mine: rec ? rec.raw : null, au: audioMid(it) };
       if (ph === 'results') {
         v.results = cache ? (cache.res ||= resultsFor(it)) : resultsFor(it);
         v.my = { answered: !!rec, correct: !!(rec && rec.correct), answer: correctText(it.q) };
@@ -1241,7 +1247,7 @@ function hostTick() {
 }
 function bufferedOf(st) { const c = st.conn; const dc = c && c.dataChannel; return (dc ? dc.bufferedAmount : 0) + ((c && c.bufferSize) || 0) * CHUNK; }
 function picPieces(it) { return it && it.kind === 'q' && Array.isArray(it.pieces) && !it.hidden ? it.pieces.filter(p => p.blob) : []; }
-function itemMids(it) { return [mediaIdFor(it), ...picPieces(it).map(p => picMid(p.id)), ...(it && it.kind === 'adv' && !it.hidden ? advPublic(it).mids : [])].filter(m => m && H.slideData.has(m)); }
+function itemMids(it) { return [mediaIdFor(it), audioMid(it), ...picPieces(it).map(p => picMid(p.id)), ...(it && it.kind === 'adv' && !it.hidden ? advPublic(it).mids : [])].filter(m => m && H.slideData.has(m)); }
 function slideOrder() {
   // current slide first, then forward, then the rest
   if (H._orderPos === H.pos && H._order) return H._order;
@@ -1444,6 +1450,7 @@ function renderHostStage() {
     stage.append(el('div', { class: 'q-card' }, el('div', { class: 'q-text', text: it.prompt || 'How are you feeling about this?' }),
       el('div', { id: 'h-check' }), el('p', { class: 'muted' }, 'Only you see these counts.')));
   }
+  if (it && (it.kind === 'slide' || it.kind === 'text' || it.kind === 'q') && it.audio) stage.append(hostListenBtn(it));
   $('#h-pos').textContent = H.items.length ? (H.pos + 1) + ' / ' + H.items.length : '';
   $('#h-prev').disabled = H.pos <= 0; $('#h-next').disabled = H.pos >= H.items.length - 1;
   const nx = H.items[H.pos + 1], prev = $('#h-next-preview'); prev.replaceChildren();
@@ -4062,7 +4069,7 @@ function handoutModal(item) {
    Script format (one page per [id]):
      [start]                      page id (letters, numbers, - and _)
      Text lines…                  shown on the page
-     SLIDE 3                      show the lesson's 3rd slide on this page
+     SLIDE 3                      show item 3 of the lesson builder (a picture slide or text slide)
      LINK Open Notebook | https://…   a link button
      * Choice label -> pageid     a choice
      ? Question | right | wrong | wrong   a checkpoint (first answer is right)
@@ -4127,7 +4134,9 @@ A strong current pushes you back! Hint: look for ar, er, ir, or, ur.
 [treasure]
 END You found the treasure!`
 };
-function parseAdventure(script, slideCount) {
+const ADV_KIND_NAMES = { q: 'question', draw: 'drawing question', dots: 'dot map', check: 'check-in', launch: 'launch card', handout: 'handout', adv: 'adventure' };
+function parseAdventure(script, items) {
+  items = Array.isArray(items) ? items : [];
   const pages = {}, order = [], errors = [], warnings = [];
   let cur = null;
   String(script || '').split(/\r?\n/).forEach((raw, n) => {
@@ -4142,7 +4151,13 @@ function parseAdventure(script, slideCount) {
     }
     if (!cur) { errors.push(ln + 'start with a page name in brackets, like [start].'); return; }
     let m;
-    if ((m = line.match(/^SLIDE\s+(\d{1,3})$/i))) { const k = +m[1]; if (!slideCount || k < 1 || k > slideCount) errors.push(ln + 'there is no slide ' + k + ' in this lesson.'); else cur.slide = k; return; }
+    if ((m = line.match(/^SLIDE\s+(\d{1,3})$/i))) {
+      const k = +m[1], t = items[k - 1];
+      if (!t) errors.push(ln + 'there is no item ' + k + ' in this lesson (it has ' + items.length + ').');
+      else if (t.kind !== 'slide' && t.kind !== 'text') errors.push(ln + 'item ' + k + ' is a ' + (ADV_KIND_NAMES[t.kind] || t.kind) + ', not a slide.');
+      else cur.slide = k;
+      return;
+    }
     if ((m = line.match(/^LINK\s+(.+?)\s*\|\s*(\S+)$/i))) { if (!/^https:\/\//i.test(m[2])) errors.push(ln + 'links must start with https://'); else cur.links.push({ label: cleanText(m[1], 60), url: m[2] }); return; }
     if ((m = line.match(/^\*\s*(.+?)\s*->\s*([A-Za-z0-9_-]+)$/))) { cur.choices.push({ label: cleanText(m[1], 80), to: m[2].toLowerCase() }); return; }
     if ((m = line.match(/^\?\s*(.+)$/))) {
@@ -4174,8 +4189,30 @@ function parseAdventure(script, slideCount) {
   return { pages, order, start, errors, warnings, endings, checkpoints: order.filter(id => pages[id].q).length };
 }
 function advSlideItems(items) { return items.filter(x => x.kind === 'slide'); }
+/* Keep SLIDE numbers pointing at the same slide when items are moved: numbers are saved with the slide's id */
+function advRefs(script, items) {
+  const refs = {};
+  String(script || '').replace(/^\s*SLIDE\s+(\d{1,3})\s*$/gmi, (m, n) => { const t = items[+n - 1]; if (t && (t.kind === 'slide' || t.kind === 'text')) refs[n] = t.id; return m; });
+  return refs;
+}
+function advSyncSlides(it, items) {
+  if (!it.slideRefs) return false;
+  let changed = false;
+  const script = String(it.script || '').replace(/^(\s*SLIDE\s+)(\d{1,3})(\s*)$/gmi, (m, pre, n, post) => {
+    const id = it.slideRefs[n]; if (!id) return m;
+    const at = items.findIndex(x => x.id === id); if (at < 0) return m;
+    if (String(at + 1) !== n) changed = true;
+    return pre + (at + 1) + post;
+  });
+  if (changed) { it.script = script; it.slideRefs = advRefs(script, items); }
+  return changed;
+}
+function advSlideList(items) {
+  const list = items.map((x, i) => (x.kind === 'slide' || x.kind === 'text') ? (i + 1) + (x.kind === 'text' ? ' (text)' : '') + (x.hidden ? ' 🙈' : '') : null).filter(Boolean);
+  return list.length ? 'Slides you can use: ' + list.join(', ') : 'This lesson has no slides yet. Add slides, then use their item numbers.';
+}
 function advMid(slideItem) { return 'av-' + slideItem.id; }
-function advParsed(it) { return parseAdventure(it.script, advSlideItems(H ? H.items : (B ? B.lesson.items : [])).length); }
+function advParsed(it) { return parseAdventure(it.script, H ? H.items : (B ? B.lesson.items : [])); }
 
 /* ---------- teacher: session state ---------- */
 function advState(it) {
@@ -4184,10 +4221,11 @@ function advState(it) {
 }
 function advPublic(it) {
   if (H.advPub[it.id]) return H.advPub[it.id];
-  const A = advParsed(it), slides = advSlideItems(H.items), pages = {};
+  const A = advParsed(it), pages = {};
   for (const id of A.order) {
-    const p = A.pages[id];
-    pages[id] = { id, text: p.text.join('\n'), slide: p.slide ? advMid(slides[p.slide - 1]) : null, links: p.links, choices: p.choices.map(c => c.label),
+    const p = A.pages[id], t = p.slide ? H.items[p.slide - 1] : null;
+    pages[id] = { id, text: p.text.join('\n'), slide: t && t.kind === 'slide' ? advMid(t) : null,
+      slideText: t && t.kind === 'text' ? { title: t.title || '', body: t.body || '' } : null, links: p.links, choices: p.choices.map(c => c.label),
       q: p.q ? { text: p.q.text, options: shuffle(p.q.options) } : null, end: p.end };
   }
   return (H.advPub[it.id] = { pages, start: A.start, total: A.endings.length, mids: [...new Set(Object.values(pages).map(p => p.slide).filter(Boolean))] });
@@ -4265,6 +4303,7 @@ function buildAdvView(v) {
   const p = v.pages[st.page], card = el('div', { class: 'q-card adv-card' });
   card.append(el('div', { class: 'adv-title' }, '🗺️ ' + v.title));
   if (p.slide) { const u = mediaUrl(p.slide); card.append(el('div', { class: 'adv-slide' }, u ? el('img', { src: u, alt: 'Slide' }) : el('div', { class: 'slide-loading' }, 'Loading slide…'))); }
+  if (p.slideText) card.append(el('div', { class: 'text-slide adv-textslide' }, p.slideText.title ? el('h2', { text: p.slideText.title }) : null, el('p', { text: p.slideText.body })));
   if (p.text) card.append(el('p', { class: 'adv-text', text: p.text }));
   if (prefs.read && (p.text || p.q || p.end)) card.append(readBtn(() => [p.text, p.q && p.q.text, p.q && p.q.options.join(', '), p.end].filter(Boolean).join('. ')));
   if (p.links.length) card.append(el('div', { class: 'adv-links' }, p.links.map(l => el('a', { class: 'btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, '🔗 ' + l.label))));
@@ -4291,41 +4330,155 @@ function onAdvPage(m) {
 
 /* ---------- lesson builder: the adventure editor ---------- */
 function advModal(item) {
-  const slideCount = advSlideItems(B.lesson.items).length;
   openModal((card, close) => {
     card.classList.add('wide');
     const title = el('input', { maxlength: 80, placeholder: 'Revamp a unit with Notebook' }); title.value = item ? item.title : '';
     const ta = el('textarea', { rows: 16, class: 'adv-script', spellcheck: 'false', 'aria-label': 'Adventure script' }); ta.value = item ? item.script : '';
     const report = el('div', { class: 'adv-check', 'aria-live': 'polite' });
     const check = () => {
-      const A = parseAdventure(ta.value, slideCount);
-      report.replaceChildren(
+      const A = parseAdventure(ta.value, B.lesson.items);
+      report.replaceChildren(...[
         el('p', null, el('strong', null, A.order.length + ' pages · ' + A.endings.length + ' ending' + (A.endings.length === 1 ? '' : 's') + ' · ' + A.checkpoints + ' checkpoint' + (A.checkpoints === 1 ? '' : 's')), A.errors.length ? '' : '  ✓ Ready'),
         A.errors.length ? el('ul', { class: 'error' }, A.errors.slice(0, 8).map(e => el('li', { text: e }))) : null,
         A.warnings.length ? el('ul', { class: 'muted' }, A.warnings.slice(0, 6).map(w => el('li', { text: '⚠ ' + w }))) : null,
-        el('div', { class: 'adv-map' }, A.order.map(id => { const p = A.pages[id]; const to = p.end ? ['🏁 end'] : [...p.choices.map(c => c.to), ...(p.q ? ['✓ ' + p.right, '✗ ' + p.wrong] : [])]; return el('div', { class: 'adv-map-row' }, el('code', null, '[' + id + ']'), p.slide ? el('span', { class: 'tag' }, 'slide ' + p.slide) : null, p.q ? el('span', { class: 'tag' }, '?') : null, el('span', { class: 'muted' }, '→ ' + to.join(', '))); })));
+        el('div', { class: 'adv-map' }, A.order.map(id => { const p = A.pages[id]; const to = p.end ? ['🏁 end'] : [...p.choices.map(c => c.to), ...(p.q ? ['✓ ' + p.right, '✗ ' + p.wrong] : [])]; return el('div', { class: 'adv-map-row' }, el('code', null, '[' + id + ']'), p.slide ? el('span', { class: 'tag' }, 'item ' + p.slide) : null, p.q ? el('span', { class: 'tag' }, '?') : null, el('span', { class: 'muted' }, '→ ' + to.join(', '))); }))].filter(Boolean));
       return A;
     };
     ta.addEventListener('input', check);
     card.append(el('h2', null, item ? 'Edit adventure' : '🗺️ Add an adventure'), el('label', null, 'Title'), title,
       el('div', { class: 'row-inline' }, el('label', null, 'Script'), el('button', { class: 'btn btn-small', type: 'button', onclick: () => { ta.value = ADV_EXAMPLES.student; check(); } }, 'Insert student example'),
         el('button', { class: 'btn btn-small', type: 'button', onclick: () => { ta.value = ADV_EXAMPLES.pd; check(); } }, 'Insert PD example')),
+      el('p', { class: 'muted adv-slidelist' }, advSlideList(B.lesson.items) + '. SLIDE uses the item numbers on the left of the lesson builder.'),
       ta,
       el('details', { class: 'adv-help' }, el('summary', null, 'How to write a script'),
-        el('pre', null, '[start]            a page (letters, numbers, - and _)\nText…              what the page says\nSLIDE 3            show the lesson’s 3rd slide (teacher-only slides work too)\nLINK Label | https://…   a link button\n* Choice -> page   a choice button\n? Question | right answer | wrong | wrong   a checkpoint\nright -> page      where a right answer goes\nwrong -> page      where a wrong answer goes\nEND Message        an ending')),
+        el('pre', null, '[start]            a page (letters, numbers, - and _)\nText…              what the page says\nSLIDE 13           show item 13 of the lesson builder (a picture or text slide; teacher-only works too)\nLINK Label | https://…   a link button\n* Choice -> page   a choice button\n? Question | right answer | wrong | wrong   a checkpoint\nright -> page      where a right answer goes\nwrong -> page      where a wrong answer goes\nEND Message        an ending')),
       report,
       el('div', { class: 'spin-buttons' },
         el('button', { class: 'btn btn-primary', onclick: () => {
           const A = check();
           if (A.errors.length) { toast('Fix the problems listed first.'); return; }
           const t = cleanText(title.value, 80).trim() || 'Adventure', script = String(ta.value).slice(0, 20000);
-          if (item) Object.assign(item, { title: t, script });
-          else B.lesson.items.push({ id: uid(), kind: 'adv', title: t, script, notes: '' });
+          const slideRefs = advRefs(script, B.lesson.items);
+          if (item) Object.assign(item, { title: t, script, slideRefs });
+          else B.lesson.items.push({ id: uid(), kind: 'adv', title: t, script, slideRefs, notes: '' });
           card.classList.remove('wide'); saveLessonSoon(); renderBuilder(); close();
           if (!item) toast('Adventure added at the end. Use Move to… to place it.');
         } }, item ? 'Save' : 'Add adventure'),
         el('button', { class: 'btn btn-ghost', onclick: () => { card.classList.remove('wide'); close(); } }, 'Cancel')));
     check();
+  });
+}
+
+/* =====================================================================
+   30. TEACHER READ-ALOUD RECORDINGS
+   The teacher records (or uploads) a short clip for a slide, text slide or question.
+   Students get a 🔊 Listen button that plays the teacher's voice; the computer voice is the fallback.
+   ===================================================================== */
+const AUDIO_MAX = 1024 * 1024, AUDIO_SECS = 60;
+function audioMid(it) { return it && it.audio && isStudentItem(it) ? 'au-' + it.id : null; }
+function audioItems(items) { return items.filter(it => it.audio && isStudentItem(it) && ['slide', 'text', 'q'].includes(it.kind)); }
+
+/* ---------- student ---------- */
+function playClip(url) {
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  if (!S.audioEl) S.audioEl = new Audio();
+  const a = S.audioEl; a.pause(); a.src = url; a.currentTime = 0;
+  const p = a.play(); if (p && p.catch) p.catch(() => toast('Tap again to listen.'));
+}
+function listenBtn(v, fallbackText) {
+  if (v.au) return el('button', { class: 'btn read-btn listen-btn', type: 'button', onclick: () => {
+    const u = mediaUrl(v.au);
+    if (!u) { toast('Almost ready — try again in a second.'); return; }
+    playClip(u);
+  } }, '🔊 Listen');
+  if (prefs.read && fallbackText) return readBtn(() => fallbackText);
+  return null;
+}
+
+/* ---------- teacher: preview on the presenter ---------- */
+function hostListenBtn(it) {
+  if (!it || !it.audio) return null;
+  return el('button', { class: 'btn btn-small', type: 'button', onclick: () => {
+    if (!H.audioEl) H.audioEl = new Audio();
+    const mid = 'au-' + it.id; if (!H.urls.get(mid)) H.urls.set(mid, URL.createObjectURL(it.audio));
+    H.audioEl.src = H.urls.get(mid); H.audioEl.play().catch(() => {});
+  } }, '🔊 Play my recording');
+}
+
+/* ---------- lesson builder ---------- */
+function audioRow(it) {
+  const row = el('div', { class: 'audio-row' });
+  const draw = () => {
+    row.replaceChildren();
+    if (it.audio) {
+      const u = URL.createObjectURL(it.audio); B.urls.push(u);
+      row.append(el('span', { class: 'muted' }, '🎙️ Your recording' + (it.audioSecs ? ' · ' + it.audioSecs + ' s' : '') + ' · ' + fmtSize(it.audio.size)),
+        el('audio', { controls: true, src: u, preload: 'none' }),
+        el('button', { class: 'btn btn-small', type: 'button', onclick: () => recordModal(it, draw) }, 'Re-record'),
+        el('button', { class: 'btn btn-small btn-danger', type: 'button', onclick: () => { delete it.audio; delete it.audioSecs; saveLessonSoon(); draw(); } }, 'Remove'));
+    } else {
+      row.append(el('span', { class: 'muted' }, 'Read-aloud recording (your voice):'),
+        el('button', { class: 'btn btn-small', type: 'button', onclick: () => recordModal(it, draw) }, '🎙️ Record'),
+        fileButton('Upload audio', 'audio/*', async f => {
+          if (f.size > AUDIO_MAX) { toast('That clip is ' + fmtSize(f.size) + '. Keep recordings under 1 MB (about 30–45 seconds).'); return; }
+          const secs = await new Promise(res => { const a = new Audio(); a.preload = 'metadata'; a.onloadedmetadata = () => res(isFinite(a.duration) ? Math.round(a.duration) : 0); a.onerror = () => res(-1); a.src = URL.createObjectURL(f); });
+          if (secs < 0) { toast('This browser can’t play that file. Try an MP3 or M4A.'); return; }
+          it.audio = f; it.audioSecs = secs; saveLessonSoon(); draw(); toast('Recording added.');
+        }));
+    }
+  };
+  draw();
+  return row;
+}
+function pickRecorderType() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  for (const t of ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus']) if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+  return '';
+}
+function recordModal(it, done) {
+  const type = pickRecorderType();
+  if (type === null || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('This browser can’t record. Use Upload audio instead.'); return; }
+  openModal((card, close) => {
+    let stream = null, rec = null, chunks = [], blob = null, t0 = 0, tick = null, secs = 0, url = null;
+    const status = el('div', { class: 'rec-status', 'aria-live': 'polite' }, 'Press Record, then read the slide aloud. Up to ' + AUDIO_SECS + ' seconds.');
+    const btns = el('div', { class: 'spin-buttons' });
+    const stopAll = () => { clearInterval(tick); if (rec && rec.state !== 'inactive') rec.stop(); if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; };
+    const finish = () => { stopAll(); if (url) URL.revokeObjectURL(url); close(); };
+    const show = state => {
+      btns.replaceChildren();
+      if (state === 'idle') btns.append(el('button', { class: 'btn btn-sun', onclick: start }, '🎙️ Record'), el('button', { class: 'btn btn-ghost', onclick: finish }, 'Cancel'));
+      if (state === 'rec') btns.append(el('button', { class: 'btn btn-primary', onclick: () => rec.stop() }, '■ Stop'));
+      if (state === 'done') {
+        url = URL.createObjectURL(blob);
+        btns.append(el('audio', { controls: true, src: url }),
+          el('button', { class: 'btn btn-primary', onclick: () => { it.audio = blob; it.audioSecs = secs; saveLessonSoon(); stopAll(); if (url) URL.revokeObjectURL(url); close(); done(); toast('Recording saved.'); } }, '✓ Keep'),
+          el('button', { class: 'btn', onclick: () => { if (url) URL.revokeObjectURL(url); url = null; blob = null; show('idle'); status.textContent = 'Press Record to try again.'; } }, 'Re-record'),
+          el('button', { class: 'btn btn-ghost', onclick: finish }, 'Cancel'));
+      }
+    };
+    async function start() {
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+      catch { status.textContent = 'The microphone isn’t available. Check that the browser may use it, or use Upload audio.'; return; }
+      let n = 3; status.textContent = 'Starting in 3…'; btns.replaceChildren();
+      const cd = setInterval(() => {
+        n--;
+        if (n > 0) { status.textContent = 'Starting in ' + n + '…'; return; }
+        clearInterval(cd);
+        chunks = [];
+        rec = new MediaRecorder(stream, Object.assign({ audioBitsPerSecond: 32000 }, type ? { mimeType: type } : {}));
+        rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        rec.onstop = () => {
+          clearInterval(tick); if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
+          blob = new Blob(chunks, { type: (rec.mimeType || type || 'audio/webm').split(';')[0] });
+          if (blob.size > AUDIO_MAX) { status.textContent = 'That recording is too long. Try a shorter one.'; show('idle'); return; }
+          status.textContent = 'Listen back: keep it or record again. (' + secs + ' seconds)'; show('done');
+        };
+        rec.start(250); t0 = Date.now(); show('rec');
+        tick = setInterval(() => { secs = Math.round((Date.now() - t0) / 1000); status.textContent = '● Recording… ' + secs + ' s'; if (secs >= AUDIO_SECS) rec.stop(); }, 250);
+      }, 700);
+    }
+    card.append(el('h2', null, '🎙️ Record your read-aloud'), status, btns);
+    show('idle');
   });
 }
 
@@ -4420,7 +4573,8 @@ async function exportLesson(l) {
   toast('Preparing lesson file…');
   const items = [];
   for (const it of l.items) {
-    const { blob, img, bg, pieces, src, file, ...rest } = it;
+    const { blob, img, bg, pieces, src, file, audio, ...rest } = it;
+    if (audio) rest.audioData = await blobToDataURL(audio);
     if (file) rest.fileData = await blobToDataURL(file);
     if (blob) rest.data = await blobToDataURL(blob);
     if (pieces) rest.pieces = await Promise.all(pieces.map(async p => ({ id: p.id, w: p.w, h: p.h, box: p.box || null, data: await blobToDataURL(p.blob) })));
@@ -4446,6 +4600,7 @@ async function importLesson(file) {
     const items = [];
     for (const it of d.items.slice(0, 200)) {
       const base = { id: uid(), notes: cleanText(it.notes, 1000), read: cleanText(it.read, 600), signup: !!it.signup, ...(it.hidden && (it.kind === 'slide' || it.kind === 'text' || it.kind === 'handout') ? { hidden: true } : {}) };
+      if (typeof it.audioData === 'string' && /^data:audio\/[\w.+-]+(;[\w=.+-]+)*;base64,/.test(it.audioData)) { const ab = await (await fetch(it.audioData)).blob(); if (ab.size <= AUDIO_MAX * 1.5) { base.audio = ab; base.audioSecs = Math.max(0, Math.round(+it.audioSecs || 0)); } }
       if (it.kind === 'adv') { items.push({ id: base.id, kind: 'adv', title: cleanText(it.title, 80) || 'Adventure', script: String(it.script || '').slice(0, 20000), notes: base.notes }); continue; }
       if (it.kind === 'handout') {
         const link = typeof it.link === 'string' && handoutLinkOk(it.link) ? it.link : '';
@@ -4627,6 +4782,7 @@ function saveLessonSoon() {
   $('#bld-status').textContent = 'Saving…';
 }
 function renderBuilder() {
+  if (B && B.lesson) { let moved = false; for (const x of B.lesson.items) if (x.kind === 'adv' && advSyncSlides(x, B.lesson.items)) moved = true; if (moved) saveLessonSoon(); }
   B.urls.forEach(u => URL.revokeObjectURL(u)); B.urls = [];
   const list = $('#bld-list'); list.replaceChildren();
   const items = B.lesson.items;
@@ -4649,7 +4805,7 @@ function renderBuilder() {
       inp.addEventListener('input', () => { it[key] = inp.value; saveLessonSoon(); });
       fields.append(el('label', null, label), inp);
     };
-    if (it.kind === 'adv') { const A = parseAdventure(it.script, items.filter(x => x.kind === 'slide').length); fields.append(el('div', { class: 'tag' }, '🗺️ Adventure'), el('div', null, el('strong', null, it.title)),
+    if (it.kind === 'adv') { const A = parseAdventure(it.script, items); fields.append(el('div', { class: 'tag' }, '🗺️ Adventure'), el('div', null, el('strong', null, it.title)),
       el('p', { class: 'muted launch-sum' }, A.order.length + ' pages · ' + A.endings.length + ' endings · ' + A.checkpoints + ' checkpoints' + (A.errors.length ? '  ⚠ ' + A.errors.length + ' problem' + (A.errors.length === 1 ? '' : 's') : '')),
       el('div', null, el('button', { class: 'btn btn-small', onclick: () => advModal(it) }, '✎ Edit adventure'))); }
     if (it.kind === 'handout') fields.append(el('div', { class: 'tag' }, '📄 Handout'), el('div', null, el('strong', null, it.title || 'Handout')),
@@ -4673,6 +4829,7 @@ function renderBuilder() {
         : fileButton('🖼 Add picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height, 960, 0.8); it.img = r.blob; it.imgW = r.w; it.imgH = r.h; saveLessonSoon(); renderBuilder(); } catch { toast('Could not read that picture.'); } })));
     }
     if (it.kind === 'slide' || it.kind === 'text' || it.kind === 'draw' || it.kind === 'dots') field('Read-aloud text (students tap 🔊)', 'read', true, 600);
+    if (it.kind === 'slide' || it.kind === 'text' || it.kind === 'q') fields.append(audioRow(it));
     field('Teacher notes (only you see these)', 'notes', true, 1000);
     const su = el('input', { type: 'checkbox' }); su.checked = !!it.signup;
     su.addEventListener('change', () => { it.signup = su.checked; saveLessonSoon(); });
