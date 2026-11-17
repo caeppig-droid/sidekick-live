@@ -5141,3 +5141,154 @@ function init() {
 // For automated tests only: read-only peek at state.
 window.SidekickLive = { host: () => H, student: () => S };
 init();
+
+/* =====================================================================
+   31. PASTE A LESSON: Notebook writes simple lines, Sidekick builds the items
+   SLIDE Title | bullet | bullet          TEXT Title | text
+   MC / TF / TYPE / BANK / ORDER / MATCH / SORT  Question | answers…
+   DOTMAP Prompt | Area, Area*, Area      DRAW Prompt          CHECKIN Question
+   LAUNCH wordbuilder | car/pet, har/vest   LAUNCH boss | 8 questions | 45 seconds | easy
+   LAUNCH dive | 8 questions | 45 seconds | 3 teams   LAUNCH spinner | Prompt   LAUNCH timer | 5 minutes
+   HANDOUT Title | https://…              NOTE text / READ text  (for the item above)
+   ADVENTURE Title … END ADVENTURE        (an adventure script in between)
+   ===================================================================== */
+const PASTE_Q = { MC: 'Multiple choice', TF: 'True/False', TYPE: 'Type the answer', BANK: 'Word bank', ORDER: 'Put in order', MATCH: 'Match', SORT: 'Sort' };
+const PASTE_ICON = { text: '📝', q: '❓', dots: '📍', draw: '✏️', check: '💬', launch: '🚀', handout: '📄', adv: '🗺️' };
+function pasteSplit(s) { return String(s).split('|').map(x => x.trim()); }
+function pasteNum(parts, re) { for (const p of parts) { const m = p.match(re); if (m) return +m[1]; } return null; }
+/* Turn the pasted text into rows: { text (the lines), spec (what to build), error } */
+function pasteParse(text) {
+  const lines = String(text || '').replace(/\r/g, '').split('\n'), rows = [];
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim().replace(/^(\d+[.)]|[-•*])\s+/, '');
+    if (!line || line.startsWith('#')) continue;
+    const kw = (line.match(/^([A-Za-z]+)\b/) || [])[1] || '', KW = kw.toUpperCase(), rest = line.slice(kw.length).replace(/^\s*[:\-–]?\s*/, '');
+    if (KW === 'NOTE' || KW === 'READ') {
+      const last = rows[rows.length - 1];
+      if (!last) { rows.push({ text: line, error: 'A NOTE or READ line needs an item above it.' }); continue; }
+      last.text += '\n' + line; pasteBuild(last); continue;
+    }
+    if (KW === 'ADVENTURE') {
+      const block = [line]; i++;
+      while (i < lines.length && !/^\s*END\s+ADVENTURE\s*$/i.test(lines[i])) { block.push(lines[i]); i++; }
+      block.push('END ADVENTURE');
+      const row = { text: block.join('\n') }; pasteBuild(row); rows.push(row); continue;
+    }
+    const row = { text: line }; pasteBuild(row); rows.push(row);
+  }
+  return rows;
+}
+/* (Re)build one row's spec from its text */
+function pasteBuild(row) {
+  row.error = ''; row.spec = null;
+  const lines = row.text.split('\n'), first = lines[0].trim().replace(/^(\d+[.)]|[-•*])\s+/, '');
+  const kw = (first.match(/^([A-Za-z]+)\b/) || [])[1] || '', KW = kw.toUpperCase();
+  const rest = first.slice(kw.length).replace(/^\s*[:\-–]?\s*/, ''), parts = pasteSplit(rest);
+  let notes = '', read = '';
+  if (KW !== 'ADVENTURE') lines.slice(1).forEach(l => { const m = l.trim().match(/^(NOTE|READ)\b\s*[:\-–]?\s*(.*)$/i); if (m) { if (m[1].toUpperCase() === 'NOTE') notes += (notes ? '\n' : '') + m[2]; else read += (read ? ' ' : '') + m[2]; } });
+  const S2 = (spec, label) => { row.spec = Object.assign(spec, { notes: cleanText(notes, 1000), read: cleanText(read, 600) }); row.label = label; };
+  try {
+    if (KW === 'SLIDE' || KW === 'TEXT') {
+      if (!parts[0]) throw new Error('add a title after ' + KW + '.');
+      const body = KW === 'SLIDE' ? parts.slice(1).filter(Boolean).map(b => '• ' + b).join('\n') : parts.slice(1).join('\n');
+      S2({ kind: 'text', title: cleanText(parts[0], 120), body: cleanText(body, 2000) }, (KW === 'SLIDE' ? 'Slide: ' : 'Text: ') + parts[0]);
+    } else if (PASTE_Q[KW]) {
+      const q = questionFromRow(PASTE_Q[KW], parts[0], parts.slice(1, 7), '');
+      S2({ kind: 'q', q }, PASTE_Q[KW] + ': ' + parts[0]);
+    } else if (KW === 'DOTMAP') {
+      if (!parts[0]) throw new Error('add a question after DOTMAP.');
+      const names = (parts[1] || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 8);
+      if (names.length === 1) throw new Error('give 2 to 8 areas, separated by commas (or none).');
+      const zones = names.length ? cols(names.length).map((z, i) => ({ ...z, l: cleanText(names[i].replace(/\*$/, ''), 40), correct: /\*$/.test(names[i]) })) : [];
+      S2({ kind: 'dots', prompt: cleanText(parts[0], 200), bg: null, bgW: 0, bgH: 0, zones, showZones: !zones.some(z => z.correct) }, 'Dot map: ' + parts[0] + (names.length ? ' (' + names.map(n => n.replace(/\*$/, '')).join(', ') + ')' : ''));
+    } else if (KW === 'DRAW') {
+      if (!parts[0]) throw new Error('add a prompt after DRAW.');
+      S2({ kind: 'draw', prompt: cleanText(parts[0], 200), bg: null, bgW: 0, bgH: 0 }, 'Drawing: ' + parts[0]);
+    } else if (KW === 'CHECKIN') {
+      S2({ kind: 'check', prompt: cleanText(parts[0] || 'How are you feeling about this?', 200) }, 'Check-in: ' + (parts[0] || 'How are you feeling about this?'));
+    } else if (KW === 'LAUNCH') {
+      const tool = norm(parts[0]).replace(/\s+/g, ''), opts = parts.slice(1), low = opts.join(' | ').toLowerCase();
+      let L;
+      if (/^(wordbuilder|wb|word)/.test(tool)) L = { tool: 'wb', words: launchWords(opts.filter(o => !/^(type|typing|tiles|count)/i.test(o)).join(',')), input: /typ/.test(low) ? 'type' : 'tiles', countStep: /count/.test(low), preset: /parts/.test(low) ? 'fullplus' : 'full' };
+      else if (/^boss/.test(tool)) L = { tool: 'boss', setId: '', n: pasteNum(opts, /(\d+)\s*q/i) || 10, secs: pasteNum(opts, /(\d+)\s*s/i) ?? 30, level: /easy/.test(low) ? 'easy' : /hard/.test(low) ? 'hard' : 'medium', monster: /soggy/.test(low) ? 'soggy' : /bolt|robot/.test(low) ? 'bolt' : 'grumble', charge: true, shuffle: true };
+      else if (/^(dive|race|treasure)/.test(tool)) L = { tool: 'race', setId: '', n: pasteNum(opts, /(\d+)\s*q/i) || 10, secs: pasteNum(opts, /(\d+)\s*s/i) ?? 30, teams: pasteNum(opts, /(\d+)\s*team/i) || 3, events: /often/.test(low) ? 'often' : /off|no event/.test(low) ? 'off' : 'some', shuffle: true };
+      else if (/^(spinner|spin|share)/.test(tool)) L = { tool: 'spin', prompt: opts.join(' | ') };
+      else if (/^timer/.test(tool)) { const m = pasteNum(opts, /(\d+)\s*m/i) || 0, s = pasteNum(opts, /(\d+)\s*s/i) || 0; L = { tool: 'timer', ms: ((m * 60 + s) || 120) * 1000, stChime: /chime/.test(low) }; }
+      else throw new Error('LAUNCH needs one of: wordbuilder, boss, dive, spinner, timer.');
+      const clean = cleanLaunch(L); if (L.setId === '') clean.setId = '';
+      const t = LAUNCH_TOOLS[clean.tool];
+      S2({ kind: 'launch', launch: clean }, 'Launch card: ' + t.icon + ' ' + t.name + (clean.tool === 'wb' && clean.words.length ? ' (' + clean.words.join(' → ') + ')' : ''));
+      if (clean.tool === 'boss' || clean.tool === 'race') row.warn = 'After adding, choose its question set (⚙ Edit settings).';
+    } else if (KW === 'HANDOUT') {
+      if (!handoutLinkOk(parts[1] || '')) throw new Error('add a link that starts with https:// (or add the file in the builder instead).');
+      S2({ kind: 'handout', title: cleanText(parts[0] || 'Handout', 80), file: null, fileName: '', link: parts[1] }, 'Handout: ' + (parts[0] || 'Handout'));
+    } else if (KW === 'ADVENTURE') {
+      const title = cleanText(rest, 80) || 'Adventure', script = lines.slice(1, -1).join('\n');
+      const A = parseAdventure(script, Array.from({ length: 999 }, () => ({ kind: 'slide' })));   // slide numbers are checked after adding
+      if (A.errors.length) throw new Error(A.errors[0]);
+      S2({ kind: 'adv', title, script }, 'Adventure: ' + title + ' (' + A.order.length + ' pages)');
+      if (/^\s*SLIDE\s+\d/im.test(script)) row.warn = 'Check its SLIDE numbers after adding (✎ Edit adventure).';
+    } else throw new Error('Sidekick doesn’t know “' + (kw || first.slice(0, 20)) + '”. Start the line with SLIDE, TEXT, MC, TF, TYPE, BANK, ORDER, MATCH, SORT, DOTMAP, DRAW, CHECKIN, LAUNCH, HANDOUT or ADVENTURE.');
+  } catch (e) {
+    const msg = e.message.replace(/Answer 1 \(correct\)/g, 'the right answer').replace(/Answer 2 \(wrong\)/g, 'at least one wrong answer').replace(/Answer (\d)/g, 'answer $1');
+    row.error = msg.charAt(0).toUpperCase() + msg.slice(1); row.spec = null;
+  }
+}
+function pasteModal() {
+  openModal((card, close) => {
+    card.classList.add('wide');
+    let rows = [];
+    const ta = el('textarea', { rows: 10, class: 'adv-script', spellcheck: 'false', 'aria-label': 'Lesson lines from Notebook', placeholder: 'SLIDE What is a paragraph? | A group of sentences | All about one main idea\nDOTMAP Where are you in the writing process? | Planning, Drafting, Revising, Publishing\nMC Which is the topic sentence? | Sea turtles are amazing. | They swim far. | They lay eggs.\nNOTE Model this one first.\nCHECKIN How do you feel about paragraphs?\nLAUNCH boss | 8 questions | 45 seconds | easy' });
+    const where = el('select', { 'aria-label': 'Where to add the items' },
+      el('option', { value: 'end' }, 'At the end of the lesson'), el('option', { value: 'start' }, 'At the beginning'),
+      B.lesson.items.map((x, i) => el('option', { value: String(i + 1) }, 'After item ' + (i + 1) + ': ' + (itemLabel(x).length > 40 ? itemLabel(x).slice(0, 39) + '…' : itemLabel(x)))));
+    const list = el('ol', { class: 'paste-list' }), summary = el('p', { class: 'paste-sum', 'aria-live': 'polite' });
+    const addBtn = el('button', { class: 'btn btn-primary', disabled: true }, 'Add to lesson');
+    const draw = () => {
+      list.replaceChildren(...rows.map((r, i) => {
+        const li = el('li', { class: 'paste-row' + (r.error ? ' bad' : '') });
+        const icon = r.spec ? PASTE_ICON[r.spec.kind] || '•' : '⚠';
+        li.append(el('div', { class: 'paste-main' }, el('span', { class: 'paste-icon', 'aria-hidden': 'true' }, icon),
+          el('div', null, el('strong', { text: r.spec ? r.label : r.text.split('\n')[0] }),
+            r.spec && r.spec.notes ? el('div', { class: 'muted', text: '📝 ' + r.spec.notes }) : null,
+            r.error ? el('div', { class: 'error', text: '⚠ ' + r.error }) : null,
+            r.warn && !r.error ? el('div', { class: 'muted', text: 'ℹ ' + r.warn }) : null)),
+          el('div', { class: 'paste-tools' },
+            el('button', { class: 'btn btn-small', type: 'button', 'aria-label': 'Move up', disabled: i === 0, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '▲'),
+            el('button', { class: 'btn btn-small', type: 'button', 'aria-label': 'Move down', disabled: i === rows.length - 1, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '▼'),
+            el('button', { class: 'btn btn-small', type: 'button', onclick: () => {
+              const ed = el('textarea', { rows: Math.min(10, r.text.split('\n').length + 1), class: 'adv-script', 'aria-label': 'Edit this line' }); ed.value = r.text;
+              const save = el('button', { class: 'btn btn-small btn-primary', type: 'button', onclick: () => { r.text = ed.value.trim(); pasteBuild(r); draw(); } }, 'Done');
+              li.replaceChildren(ed, save); ed.focus();
+            } }, '✎ Edit'),
+            el('button', { class: 'btn btn-small btn-danger', type: 'button', 'aria-label': 'Remove', onclick: () => { rows.splice(i, 1); draw(); } }, '✕')));
+        return li;
+      }));
+      const ok = rows.filter(r => r.spec).length, bad = rows.length - ok;
+      summary.textContent = rows.length ? ok + ' item' + (ok === 1 ? '' : 's') + ' ready' + (bad ? ' · ' + bad + ' with a problem (fix with ✎ Edit or remove it with ✕; otherwise it’s skipped)' : '') : '';
+      addBtn.disabled = !ok; addBtn.textContent = ok ? 'Add ' + ok + ' item' + (ok === 1 ? '' : 's') + ' to the lesson' : 'Add to lesson';
+    };
+    const preview = () => { rows = pasteParse(ta.value); draw(); if (!rows.length) toast('Paste the lines from Notebook first.'); };
+    addBtn.addEventListener('click', () => {
+      const items = rows.filter(r => r.spec).map(r => ({ id: uid(), ...JSON.parse(JSON.stringify(r.spec)) }));
+      if (!items.length) return;
+      const at = where.value === 'end' ? B.lesson.items.length : where.value === 'start' ? 0 : Math.min(+where.value, B.lesson.items.length);
+      B.lesson.items.splice(at, 0, ...items);
+      items.filter(x => x.kind === 'adv').forEach(x => { x.slideRefs = advRefs(x.script, B.lesson.items); });
+      card.classList.remove('wide'); saveLessonSoon(); renderBuilder(); close();
+      const row = $('#bld-list').children[at]; if (row) row.scrollIntoView({ block: 'center' });
+      toast('Added ' + items.length + ' item' + (items.length === 1 ? '' : 's') + ' (now items ' + (at + 1) + '–' + (at + items.length) + ').');
+    });
+    card.append(el('h2', null, '📋 Paste from Notebook'),
+      el('p', { class: 'muted' }, 'Paste the lines Notebook wrote, then press Preview. You can edit, reorder or remove any line before adding.'),
+      ta, el('div', { class: 'row-inline' }, el('button', { class: 'btn', type: 'button', onclick: preview }, '👀 Preview'), el('span', { class: 'muted' }, 'Add them:'), where),
+      summary, list,
+      el('details', { class: 'adv-help' }, el('summary', null, 'Line formats Sidekick understands'),
+        el('pre', null, 'SLIDE Title | bullet | bullet\nTEXT Title | text\nMC Question | right answer | wrong | wrong\nTF Statement | True   (or False)\nTYPE Question | answer | other accepted answer\nBANK The [missing] word goes in [brackets]. | decoy | decoy\nORDER Instruction | first | second | third\nMATCH Instruction | left = right | left = right\nSORT Instruction | Group: item, item | Group: item, item\nDOTMAP Question | Area, Area, Right area*\nDRAW Prompt\nCHECKIN Question\nLAUNCH wordbuilder | car/pet, har/vest | count\nLAUNCH boss | 8 questions | 45 seconds | easy\nLAUNCH dive | 8 questions | 45 seconds | 3 teams\nLAUNCH spinner | Prompt\nLAUNCH timer | 5 minutes\nHANDOUT Title | https://link\nNOTE Teacher note for the item above\nREAD Read-aloud text for the item above\nADVENTURE Title\n  …adventure script…\nEND ADVENTURE')),
+      el('div', { class: 'spin-buttons' }, addBtn, el('button', { class: 'btn btn-ghost', onclick: () => { card.classList.remove('wide'); close(); } }, 'Cancel')));
+  });
+}
+(function wirePaste() {
+  const go = () => { const b = document.getElementById('bld-add-paste'); if (b && !b.dataset.wired) { b.dataset.wired = '1'; b.addEventListener('click', pasteModal); } };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go); else go();
+})();
