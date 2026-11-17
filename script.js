@@ -580,6 +580,10 @@ function onHostMsg(m) {
     case 'ack': if (S.pendingAns && S.pendingAns.qid === m.qid) S.pendingAns = null; S.ackQid = m.qid; updateSentNote(); break;
     case 'live': S.live = m; renderLive(); break;
     case 'star': S.stars = m.stars; renderStars(true); break;
+    case 'job': onJobCard(m); break;
+    case 'jobsay': toast(cleanText(m.text, 160)); break;
+    case 'party': emojiConfetti(m.e); break;
+    case 'music': onMusicMsg(m); break;
     case 'sh': (m.p ? S.previews : S.slides).set(m.sid, { size: m.size, mime: m.mime, buf: new Uint8Array(m.size), got: 0, url: null }); break;
     case 'sc': onSlideChunk(m); break;
     case 'spin': studentSpin(m); break;
@@ -612,6 +616,7 @@ function onSlideChunk(m) {
   if (s.got >= s.size) {
     s.url = URL.createObjectURL(new Blob([s.buf], { type: s.mime })); s.buf = null;
     if (m.sid.startsWith('au-')) return;   // a read-aloud recording: ready for the Listen button
+    if (m.sid.startsWith('sb-') || m.sid.startsWith('tp-')) { const cv = S.view; if (cv && cv.k === 'text' && (cv.pic === m.sid || (cv.style && cv.style.bgMid === m.sid))) renderStudent(); return; }
     if (!m.p && m.sid.startsWith('pp-')) { picArrived(m.sid); return; }
     if (!m.p) { const pv = S.previews.get(m.sid); if (pv && pv.url) { setTimeout(() => URL.revokeObjectURL(pv.url), 5000); S.previews.delete(m.sid); } }
     else if (S.slides.get(m.sid)?.url) return;   // full one already here
@@ -671,8 +676,8 @@ function renderStudent() {
       case 'adv': stage.append(buildAdvView(v)); break;
       case 'race': stage.append(buildRaceView(v)); break;
       case 'text': {
-        const card = el('div', { class: 'text-slide' }, v.title ? el('h2', { text: v.title }) : null, el('p', { text: v.body || '' }));
-        stage.append(card);
+        const st = v.style || ssPublic(ssDefault(), null);
+        stage.append(styledSlide({ title: v.title, body: v.body, layout: v.layout, picMid: v.pic, picUrl: v.pic ? mediaUrl(v.pic) : null }, st, st.bgMid ? mediaUrl(st.bgMid) : null));
         { const lb = listenBtn(v, v.read || ((v.title || '') + '. ' + (v.body || ''))); if (lb) stage.append(lb); }
         break;
       }
@@ -936,7 +941,7 @@ async function startHost(lesson, snap) {
     wb: snap && snap.wb ? snap.wb : null, wbDirty: false, lastWb: 0,
     spos: snap ? (snap.spos != null ? snap.spos : snap.pos) : -1, launched: new Set(snap && snap.launched ? snap.launched : []), spinPrompt: null,
     handoutsShown: new Set(snap && snap.handouts ? snap.handouts : []), handoutGot: {},
-    adv: snap && snap.adv ? snap.adv : {}, advPub: {}, advQ: {}, advDirty: false, lastAdv: 0, advPaint: null
+    adv: snap && snap.adv ? snap.adv : {}, jobs: snap && snap.jobs ? Object.assign(jobsDefault(), snap.jobs, { pending: {} }) : null, advPub: {}, advQ: {}, advDirty: false, lastAdv: 0, advPaint: null
   };
   H.report = snap ? (lsGet(KEYS.report, null) || newReport(lesson, H.code)) : newReport(lesson, H.code);
   H.report.lessonId = lesson.id;
@@ -957,6 +962,13 @@ async function startHost(lesson, snap) {
     const mid = picMid(p.id), buf = new Uint8Array(await p.blob.arrayBuffer());
     H.slideData.set(mid, { buf, size: buf.length, mime: p.blob.type || 'image/webp', pbuf: null, psize: 0, pmime: '' });
     H.urls.set(mid, URL.createObjectURL(p.blob)); H.mediaIds.push(mid);
+  }
+  H.style = ssStyle(H.lesson); H.styleMid = 'sb-' + (H.lesson.id || 'lesson');
+  { const extra = [];   // the lesson's slide-style background and pictures on "Title + picture" slides
+    if (H.style.bg && H.items.some(x => x.kind === 'text' && isStudentItem(x))) extra.push([H.styleMid, H.style.bg]);
+    for (const it of H.items) if (it.kind === 'text' && it.pic && it.layout === 'pic' && isStudentItem(it)) extra.push(['tp-' + it.id, it.pic]);
+    for (const [mid, blob] of extra) { const buf = new Uint8Array(await blob.arrayBuffer());
+      H.slideData.set(mid, { buf, size: buf.length, mime: blob.type || 'image/webp', pbuf: null, psize: 0, pmime: '' }); H.urls.set(mid, URL.createObjectURL(blob)); H.mediaIds.push(mid); }
   }
   for (const it of audioItems(H.items)) {   // teacher read-aloud recordings
     const mid = 'au-' + it.id, buf = new Uint8Array(await it.audio.arrayBuffer());
@@ -1102,6 +1114,8 @@ function hostOnData(conn, m) {
     case 'wbb': wbBoardMsg(st, m); break;
     case 'wbc': wbCountMsg(st, m); break;
     case 'hog': handoutGotMsg(st, m); break;
+    case 'jobpick': jobPick(st, m); break;
+    case 'jobroll': jobRoll(st, m); break;
     case 'adv': advMsg(st, m); break;
   }
 }
@@ -1169,7 +1183,8 @@ function viewMsg(st, cache) {
       const rec = (H.report.answers[it.id] || {})[st.id];
       return { ...base, k: 'draw', qid: it.id, prompt: it.prompt || '', read: it.read || '', bg: mediaIdFor(it), aspect: drawAspect(it), phase: H.phase[it.id] || 'open', mine: rec ? rec.raw : null };
     }
-    case 'text': return { ...base, k: 'text', title: it.title || '', body: it.body || '', read: it.read || '', au: audioMid(it) };
+    case 'text': return { ...base, k: 'text', title: it.title || '', body: it.body || '', read: it.read || '', au: audioMid(it),
+      layout: SS_LAYOUTS[it.layout] ? it.layout : 'auto', pic: it.pic && it.layout === 'pic' ? 'tp-' + it.id : null, style: ssPublic(H.style, H.styleMid) };
     case 'check': { const c = H.report.checkins[it.id]; return { ...base, k: 'check', iid: it.id, prompt: it.prompt || '', mine: c && c.votes[st.id] || null }; }
     case 'q': {
       const ph = H.phase[it.id] || 'open', rec = (H.report.answers[it.id] || {})[st.id];
@@ -1224,7 +1239,7 @@ function hostAnswer(st, m) {
   H.liveDirty = true; H.reportDirty = true;
   const online = onlineStudents().length, answered = Object.keys(H.report.answers[it.id]).filter(sid => !isDemoId(sid)).length;
   if (online > 0 && !H.goalHit.has(it.id) && answered / online >= GOAL_PCT) {
-    H.goalHit.add(it.id); H.stars++; broadcast({ t: 'star', stars: H.stars }); toast('The class earned a star! ⭐'); awardStarPoint(); saveHostSnap();
+    H.goalHit.add(it.id); H.stars++; broadcast({ t: 'star', stars: H.stars }); jobsParty(); toast('The class earned a star! ⭐'); awardStarPoint(); saveHostSnap();
   }
 }
 function hostCheckin(st, m) {
@@ -1268,7 +1283,7 @@ function hostTick() {
 }
 function bufferedOf(st) { const c = st.conn; const dc = c && c.dataChannel; return (dc ? dc.bufferedAmount : 0) + ((c && c.bufferSize) || 0) * CHUNK; }
 function picPieces(it) { return it && it.kind === 'q' && Array.isArray(it.pieces) && !it.hidden ? it.pieces.filter(p => p.blob) : []; }
-function itemMids(it) { return [mediaIdFor(it), audioMid(it), ...picPieces(it).map(p => picMid(p.id)), ...(it && it.kind === 'adv' && !it.hidden ? advPublic(it).mids : [])].filter(m => m && H.slideData.has(m)); }
+function itemMids(it) { return [mediaIdFor(it), audioMid(it), ...(it && it.kind === 'text' && isStudentItem(it) ? [H.styleMid, it.pic && it.layout === 'pic' ? 'tp-' + it.id : null] : []), ...picPieces(it).map(p => picMid(p.id)), ...(it && it.kind === 'adv' && !it.hidden ? advPublic(it).mids : [])].filter(m => m && H.slideData.has(m)); }
 function slideOrder() {
   // current slide first, then forward, then the rest
   if (H._orderPos === H.pos && H._order) return H._order;
@@ -1361,7 +1376,7 @@ function saveHostSnap() {
       code: H.code, lessonId: H.lesson.id, pos: H.pos, phase: H.phase, review: H.review,
       students: [...H.students.values()].map(s => ({ id: s.id, token: s.token, name: s.name, vol: s.vol, shared: s.shared })),
       manual: H.manual, spin: H.spin, stars: H.stars, goalHit: [...H.goalHit],
-      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], handouts: [...H.handoutsShown], adv: H.adv, timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
+      signup: H.signup, ink: H.ink, sb: H.sb, dotState: H.dotState, wb: H.wb, spos: H.spos, launched: [...H.launched], handouts: [...H.handoutsShown], adv: H.adv, jobs: H.jobs ? { on: H.jobs.on, credit: H.jobs.credit, music: H.jobs.music, had: H.jobs.had, picks: H.jobs.picks, holder: H.jobs.holder } : null, timer: { total: H.timer.total, left: timerLeft(), chime: H.timer.chime, stChime: H.timer.stChime }
     });
   }, 400);
 }
@@ -1456,7 +1471,7 @@ function renderHostStage() {
   } else if (it.kind === 'dots') {
     renderDotStage(stage, it);
   } else if (it.kind === 'text') {
-    stage.append(el('div', { class: 'text-slide' }, it.title ? el('h2', { text: it.title }) : null, el('p', { text: it.body || '' })));
+    stage.append(styledSlide({ title: it.title, body: it.body, layout: it.layout, picUrl: it.pic && it.layout === 'pic' ? H.urls.get('tp-' + it.id) || null : null }, ssPublic(H.style, H.styleMid), H.style.bg ? H.urls.get(H.styleMid) || null : null));
   } else if (it.kind === 'q') {
     const ph = H.phase[it.id] || 'open';
     stage.append(hostQPreview(it));
@@ -1685,14 +1700,14 @@ const Wheels = { all() { const v = lsGet(KEYS.wheels, []); return Array.isArray(
 
 /* ---------- teacher: state helpers ---------- */
 function timerLeft() { const t = H.timer; if (!t.total) return 0; return t.run ? Math.max(0, t.left - (performance.now() - t.at)) : t.left; }
-function timerMsg() { const t = H.timer; return t.total ? { t: 'tm', left: Math.round(timerLeft()), run: t.run, total: t.total, chime: t.stChime } : { t: 'tm', off: 1 }; }
-function setTimer(patch) { Object.assign(H.timer, patch); broadcast(timerMsg()); updateHostTimer(); saveHostSnap(); if (toolsTab === 'timer') renderTools(); }
+function timerMsg() { const t = H.timer; return t.total ? { t: 'tm', left: Math.round(timerLeft()), run: t.run, total: t.total, chime: t.stChime, snd: J().picks.timer } : { t: 'tm', off: 1 }; }
+function setTimer(patch) { const fresh = !!(patch.run && patch.total); Object.assign(H.timer, patch); if (fresh) jobsOnTimerStart(); broadcast(timerMsg()); updateHostTimer(); saveHostSnap(); if (toolsTab === 'timer') renderTools(); }
 function updateHostTimer() {
   const b = $('#h-timer'); if (!H || !H.timer.total) { b.hidden = true; return; }
   const left = timerLeft(); b.hidden = false; b.textContent = (left <= 0 ? '⏰ ' : '⏱ ') + fmtTime(left);
   b.dataset.state = left <= 0 ? 'done' : left <= 10000 ? 'low' : '';
   const big = $('#tool-big-time'); if (big) big.textContent = fmtTime(left);
-  if (H.timer.run && left <= 0) { H.timer.run = false; H.timer.left = 0; broadcast(timerMsg()); if (H.timer.chime) chime(); toast('⏰ Time’s up!'); if (toolsTab === 'timer') renderTools(); }
+  if (H.timer.run && left <= 0) { H.timer.run = false; H.timer.left = 0; broadcast(timerMsg()); if (H.timer.chime) playSound(J().picks.timer); jobsParty(); toast('⏰ Time’s up!'); if (toolsTab === 'timer') renderTools(); }
 }
 function sbMsg() { return { t: 'sb', show: H.sb.show, teams: H.sb.teams }; }
 function setScore() { broadcast(sbMsg()); updateHostScore(); saveHostSnap(); }
@@ -1715,7 +1730,7 @@ function renderTools() {
   if ($('#tools-overlay').hidden) return;
   document.querySelectorAll('#tools-tabs .tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tool === toolsTab)));
   const body = $('#tools-body'); body.replaceChildren();
-  ({ timer: toolTimer, dice: toolDice, score: toolScore, wheel: toolWheel })[toolsTab](body);
+  ({ timer: toolTimer, dice: toolDice, score: toolScore, wheel: toolWheel, jobs: toolJobs })[toolsTab](body);
 }
 function toolTimer(body) {
   const t = H.timer;
@@ -1752,6 +1767,7 @@ function toolDice(body) {
   }
   const vis = el('div', { class: 'spin-visual', id: 'dice-host' });
   body.append(el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-sun', onclick: () => rollDice(vis) }, '🎲 Roll'),
+    J().on.roller ? el('button', { class: 'btn', onclick: () => jobsGiveRoll('dice') }, '🙋 Let a student roll') : null,
     el('button', { class: 'btn btn-ghost', onclick: () => { H.toolShowing = true; hideToolFromClass(); toast('Hidden from student screens.'); } }, 'Hide from class')), vis);
 }
 function rollDice(vis) {
@@ -1812,8 +1828,9 @@ function toolWheel(body) {
     el('label', { class: 'check small' }, rm, 'Take out each pick until I reset'));
   const used = H.wheel.used[pick.value] || [];
   if (used.length) body.append(el('p', { class: 'muted' }, 'Already picked: ' + used.join(', ') + ' ', el('button', { class: 'btn btn-small', onclick: () => { H.wheel.used[pick.value] = []; renderTools(); } }, 'Reset')));
-  const vis = el('div', { class: 'spin-visual' }), res = el('div', { class: 'spin-result', 'aria-live': 'assertive' });
+  const vis = el('div', { class: 'spin-visual', id: 'wheel-host' }), res = el('div', { class: 'spin-result', id: 'wheel-res', 'aria-live': 'assertive' });
   body.append(el('div', { class: 'spin-buttons' }, el('button', { class: 'btn btn-sun', onclick: () => spinWheel(vis, res) }, '🎡 Spin'),
+    J().on.roller ? el('button', { class: 'btn', onclick: () => jobsGiveRoll('wheel') }, '🙋 Let a student spin') : null,
     el('button', { class: 'btn btn-ghost', onclick: () => { H.toolShowing = true; hideToolFromClass(); toast('Hidden from student screens.'); } }, 'Hide from class')), vis, res);
 }
 function wheelItems(listId) {
@@ -1856,13 +1873,13 @@ function onTimer(m) {
   clearInterval(stTimerT);
   const b = $('#st-timer');
   if (m.off) { S.timer = null; b.hidden = true; return; }
-  S.timer = { end: Date.now() + m.left, run: m.run, left: m.left, chime: m.chime, rang: m.left <= 0 };
+  S.timer = { end: Date.now() + m.left, run: m.run, left: m.left, chime: m.chime, snd: SOUNDS[m.snd] ? m.snd : 'bell', rang: m.left <= 0 };
   const paint = () => {
     const t = S.timer; if (!t) return;
     const left = t.run ? t.end - Date.now() : t.left;
     b.hidden = false; b.textContent = (left <= 0 ? '⏰ Time’s up!' : '⏱ ' + fmtTime(left));
     b.dataset.state = left <= 0 ? 'done' : left <= 10000 ? 'low' : '';
-    if (left <= 0 && !t.rang) { t.rang = true; clearInterval(stTimerT); if (t.chime) chime(); toast('⏰ Time’s up!'); }
+    if (left <= 0 && !t.rang) { t.rang = true; clearInterval(stTimerT); if (t.chime) playSound(t.snd); toast('⏰ Time’s up!'); }
   };
   paint(); if (m.run) stTimerT = setInterval(paint, 250);
 }
@@ -3097,6 +3114,7 @@ function bossSetup() {
         el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Cancel')));
   });
 }
+function gameJobsOnce() { const j = J(); if (!j.gameOn) { j.gameOn = true; jobsOnGameStart(); } }
 function bossStart(o) {
   const all = o.shuffle ? shuffle(o.set.questions) : o.set.questions.slice();
   const qs = all.slice(0, Math.min(o.n, all.length)).map(q => JSON.parse(JSON.stringify(q)));
@@ -3105,7 +3123,7 @@ function bossStart(o) {
   H.boss = { active: true, opts: o, qs, i: -1, phase: 'intro', monster: o.monster, maxHp, hp: maxHp, answers: {}, pub: null, endAt: null,
     myHits: {}, qHits: 0, lastBcastHp: maxHp, dirty: false, lastSend: 0, powered: false, round: (H.boss ? H.boss.round : 0) + 1 };
   H.spotlight = null; broadcast({ t: 'spot', items: null });
-  broadcastView(); renderHostStage();
+  broadcastView(); renderHostStage(); gameJobsOnce();
 }
 function bossQ() { const b = H.boss; return b && b.i >= 0 ? b.qs[b.i] : null; }
 function bossQid() { return 'bb' + H.boss.round + '-' + H.boss.i; }
@@ -3131,7 +3149,7 @@ function bossReveal() {
   H.report.answers[qid] = {};
   for (const [sid, r] of Object.entries(b.answers)) H.report.answers[qid][sid] = { raw: r.raw, a: answerText(q, r.raw), correct: r.correct, t: r.t };
   H.reportDirty = true;
-  if (b.hp <= 0) b.phase = 'won';
+  if (b.hp <= 0) { b.phase = 'won'; jobsParty(); }
   else if (b.i + 1 >= b.qs.length) b.lastQ = true;
   broadcastView(); renderHostStage();
 }
@@ -3169,7 +3187,7 @@ function bossView(base, st) {
   }
   return v;
 }
-function bossEnd() { H.boss.active = false; broadcastView(); renderHostStage(); renderHostSide(); }
+function bossEnd() { musicEnd(); J().gameOn = false; H.boss.active = false; broadcastView(); renderHostStage(); renderHostSide(); }
 function renderBossStage(stage) {
   const b = H.boss, v = bossPublic(), q = bossQ();
   const arena = bossArena(v, false); stage.append(arena); b.lastBcastHp = b.hp;
@@ -3420,7 +3438,7 @@ function raceStart(o) {
   H.race = { active: true, opts: o, theme: o.theme, qs, i: -1, phase: 'teams', teams, step: 100 / (qs.length * 0.65), answers: {}, pub: null, endAt: null,
     myCorrect: {}, round: (H.race ? H.race.round : 0) + 1, prev: null, msg: [], reached: new Set([0]), winner: null };
   H.spotlight = null; broadcast({ t: 'spot', items: null });
-  broadcastView(); renderHostStage();
+  broadcastView(); renderHostStage(); gameJobsOnce();
 }
 function raceTeamOf(sid) { return H.race.teams.findIndex(t => t.members.includes(sid)); }
 function raceEnsureTeam(st) {
@@ -3473,6 +3491,7 @@ function raceReveal() {
   else { if (r.i + 1 >= r.qs.length) r.lastQ = true; broadcastView(); renderHostStage(); }
 }
 function raceFinish(outOfQuestions) {
+  jobsParty();
   const r = H.race, th = RACE_THEMES[r.theme];
   const best = r.teams.slice().sort((a, b) => b.pos - a.pos || (b.lastPct || 0) - (a.lastPct || 0))[0];
   r.winner = r.teams.indexOf(best); r.phase = 'won';
@@ -3515,7 +3534,7 @@ function raceView(base, st) {
   if (r.phase === 'won') { v.winner = r.winner; v.winText = r.winText; }
   return v;
 }
-function raceEnd() { H.race.active = false; broadcastView(); renderHostStage(); renderHostSide(); }
+function raceEnd() { musicEnd(); J().gameOn = false; H.race.active = false; broadcastView(); renderHostStage(); renderHostSide(); }
 function renderRaceStage(stage) {
   const r = H.race, th = RACE_THEMES[r.theme], q = raceQ();
   stage.append(raceScene({ teams: racePublicTeams(), phase: r.phase, myTeam: -1 }, r.prev));
@@ -4622,7 +4641,8 @@ async function exportLesson(l) {
   toast('Preparing lesson file…');
   const items = [];
   for (const it of l.items) {
-    const { blob, img, bg, pieces, src, file, audio, ...rest } = it;
+    const { blob, img, bg, pieces, src, file, audio, pic, ...rest } = it;
+    if (pic) rest.picData = await blobToDataURL(pic);
     if (audio) rest.audioData = await blobToDataURL(audio);
     if (file) rest.fileData = await blobToDataURL(file);
     if (blob) rest.data = await blobToDataURL(blob);
@@ -4633,7 +4653,7 @@ async function exportLesson(l) {
     items.push(rest);
   }
   download(l.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.sidekick-lesson.json',
-    JSON.stringify({ app: APP, kind: 'lesson', version: 1, name: l.name, items }), 'application/json');
+    JSON.stringify({ app: APP, kind: 'lesson', version: 1, name: l.name, items, style: l.style ? { ...l.style, bg: undefined, bgData: l.style.bg ? await blobToDataURL(l.style.bg) : undefined } : undefined }), 'application/json');
 }
 function cleanZones(z) {
   if (!Array.isArray(z)) return [];
@@ -4660,7 +4680,7 @@ async function importLesson(file) {
       if (it.kind === 'launch') { const L = cleanLaunch(it.launch); if (L) items.push({ id: base.id, kind: 'launch', launch: L, notes: base.notes }); continue; }
       if (it.kind === 'slide' && typeof it.data === 'string' && /^data:image\/(webp|jpeg|png);base64,/.test(it.data)) {
         const blob = await (await fetch(it.data)).blob(); items.push({ ...base, kind: 'slide', blob, w: +it.w || 0, h: +it.h || 0 });
-      } else if (it.kind === 'text') items.push({ ...base, kind: 'text', title: cleanText(it.title, 120), body: cleanText(it.body, 2000) });
+      } else if (it.kind === 'text') items.push({ ...base, kind: 'text', title: cleanText(it.title, 120), body: cleanText(it.body, 2000), layout: SS_LAYOUTS[it.layout] ? it.layout : 'auto', ...(okImg(it.picData) ? { pic: await (await fetch(it.picData)).blob() } : {}) });
       else if (it.kind === 'check') items.push({ ...base, kind: 'check', prompt: cleanText(it.prompt, 200) });
       else if (it.kind === 'q' && it.q && (it.q.type === 'psort' || it.q.type === 'pmatch') && Array.isArray(it.pieces)) {
         const pieces = [];
@@ -4675,7 +4695,12 @@ async function importLesson(file) {
       else if (it.kind === 'draw') items.push({ ...base, kind: 'draw', prompt: cleanText(it.prompt, 200), signup: !!it.signup,
         ...(okImg(it.bgData) ? { bg: await (await fetch(it.bgData)).blob(), bgW: +it.bgW || 0, bgH: +it.bgH || 0 } : { bg: null }) });
     }
-    await Lessons.put({ id: uid(), name: cleanText(d.name, 60) || 'Imported lesson', items, updated: Date.now() });
+    let style;
+    if (d.style && typeof d.style === 'object') {
+      const s0 = d.style; style = { theme: SS_THEMES[s0.theme] ? s0.theme : 'clean', bgColor: ssColor(s0.bgColor, '#FFFFFF'), title: ssColor(s0.title, '#1E2B4A'), text: ssColor(s0.text, '#1E2B4A'), accent: ssColor(s0.accent, '#E0622B'), font: SS_FONTS[s0.font] ? s0.font : 'lexend', panel: !!s0.panel, bg: null };
+      if (okImg(s0.bgData)) style.bg = await (await fetch(s0.bgData)).blob();
+    }
+    await Lessons.put({ id: uid(), name: cleanText(d.name, 60) || 'Imported lesson', items, updated: Date.now(), ...(style ? { style } : {}) });
     toast('Lesson imported.'); renderLessons();
   } catch (e) { toast('Import failed: ' + e.message); }
 }
@@ -4847,6 +4872,7 @@ function renderBuilder() {
     else if (it.kind === 'adv') thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, '🗺️'), 'Adventure');
     else if (it.kind === 'handout') thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, '📄'), 'Handout');
     else if (it.kind === 'launch') { const t = LAUNCH_TOOLS[(it.launch || {}).tool] || { icon: '🚀', name: 'Launch' }; thumb = el('div', { class: 'thumb thumb-launch' }, el('span', { class: 'launch-icon' }, t.icon), '🚀 ' + t.name); }
+    else if (it.kind === 'text') thumb = ssThumb(it, blobUrl);
     else thumb = el('div', { class: 'thumb' }, { text: '📝 Text slide', q: '❓ ' + TYPE_LABEL[it.q && it.q.type], check: '😀 Check-in' }[it.kind]);
     const fields = el('div', { class: 'bld-fields' });
     const field = (label, key, multi, max) => {
@@ -4861,7 +4887,7 @@ function renderBuilder() {
       el('p', { class: 'muted launch-sum' }, it.file ? (it.fileName || 'file') + ' · ' + fmtSize(it.file.size) : it.link ? 'Link: ' + it.link : 'No file yet'),
       el('div', null, el('button', { class: 'btn btn-small', onclick: () => handoutModal(it) }, '✎ Edit handout')));
     if (it.kind === 'launch') fields.append(el('div', { class: 'tag' }, '🚀 Launch card · students don’t see it'), el('p', { class: 'muted launch-sum' }, launchSummary(it.launch)), el('div', null, el('button', { class: 'btn btn-small', onclick: () => launchModal(it) }, '⚙ Edit settings')));
-    if (it.kind === 'text') { field('Title', 'title', false, 120); field('Text', 'body', true, 2000); }
+    if (it.kind === 'text') { field('Title', 'title', false, 120); field('Text', 'body', true, 2000); fields.append(ssFields(it, blobUrl)); }
     if (it.kind === 'check') field('Check-in question', 'prompt', false, 200);
     if (it.kind === 'draw') field('Drawing question (what students should draw or mark)', 'prompt', false, 200);
     if (it.kind === 'dots') {
@@ -5094,6 +5120,7 @@ function init() {
   $('#bld-add-pic').addEventListener('click', () => picModal(null));
   $('#bld-add-handout').addEventListener('click', () => handoutModal(null));
   $('#bld-add-adv').addEventListener('click', () => advModal(null));
+  $('#bld-style').addEventListener('click', styleModal);
   $('#st-handouts').addEventListener('click', openHandouts);
   $('#notes-minus').addEventListener('click', () => notesSize(-0.1));
   $('#notes-plus').addEventListener('click', () => notesSize(0.1));
@@ -5188,10 +5215,13 @@ function pasteBuild(row) {
   if (KW !== 'ADVENTURE') lines.slice(1).forEach(l => { const m = l.trim().match(/^(NOTE|READ)\b\s*[:\-–]?\s*(.*)$/i); if (m) { if (m[1].toUpperCase() === 'NOTE') notes += (notes ? '\n' : '') + m[2]; else read += (read ? ' ' : '') + m[2]; } });
   const S2 = (spec, label) => { row.spec = Object.assign(spec, { notes: cleanText(notes, 1000), read: cleanText(read, 600) }); row.label = label; };
   try {
-    if (KW === 'SLIDE' || KW === 'TEXT') {
+    if (KW === 'BIG') {
+      if (!parts[0]) throw new Error('add the big word after BIG.');
+      S2({ kind: 'text', title: cleanText(parts[0], 120), body: cleanText(parts.slice(1).join(' '), 300), layout: 'big' }, 'Big word: ' + parts[0]);
+    } else if (KW === 'SLIDE' || KW === 'TEXT') {
       if (!parts[0]) throw new Error('add a title after ' + KW + '.');
       const body = KW === 'SLIDE' ? parts.slice(1).filter(Boolean).map(b => '• ' + b).join('\n') : parts.slice(1).join('\n');
-      S2({ kind: 'text', title: cleanText(parts[0], 120), body: cleanText(body, 2000) }, (KW === 'SLIDE' ? 'Slide: ' : 'Text: ') + parts[0]);
+      S2({ kind: 'text', title: cleanText(parts[0], 120), body: cleanText(body, 2000), layout: 'auto' }, (KW === 'SLIDE' ? 'Slide: ' : 'Text: ') + parts[0]);
     } else if (PASTE_Q[KW]) {
       const q = questionFromRow(PASTE_Q[KW], parts[0], parts.slice(1, 7), '');
       S2({ kind: 'q', q }, PASTE_Q[KW] + ': ' + parts[0]);
@@ -5228,7 +5258,7 @@ function pasteBuild(row) {
       if (A.errors.length) throw new Error(A.errors[0]);
       S2({ kind: 'adv', title, script }, 'Adventure: ' + title + ' (' + A.order.length + ' pages)');
       if (/^\s*SLIDE\s+\d/im.test(script)) row.warn = 'Check its SLIDE numbers after adding (✎ Edit adventure).';
-    } else throw new Error('Sidekick doesn’t know “' + (kw || first.slice(0, 20)) + '”. Start the line with SLIDE, TEXT, MC, TF, TYPE, BANK, ORDER, MATCH, SORT, DOTMAP, DRAW, CHECKIN, LAUNCH, HANDOUT or ADVENTURE.');
+    } else throw new Error('Sidekick doesn’t know “' + (kw || first.slice(0, 20)) + '”. Start the line with SLIDE, BIG, TEXT, MC, TF, TYPE, BANK, ORDER, MATCH, SORT, DOTMAP, DRAW, CHECKIN, LAUNCH, HANDOUT or ADVENTURE.');
   } catch (e) {
     const msg = e.message.replace(/Answer 1 \(correct\)/g, 'the right answer').replace(/Answer 2 \(wrong\)/g, 'at least one wrong answer').replace(/Answer (\d)/g, 'answer $1');
     row.error = msg.charAt(0).toUpperCase() + msg.slice(1); row.spec = null;
@@ -5284,11 +5314,361 @@ function pasteModal() {
       ta, el('div', { class: 'row-inline' }, el('button', { class: 'btn', type: 'button', onclick: preview }, '👀 Preview'), el('span', { class: 'muted' }, 'Add them:'), where),
       summary, list,
       el('details', { class: 'adv-help' }, el('summary', null, 'Line formats Sidekick understands'),
-        el('pre', null, 'SLIDE Title | bullet | bullet\nTEXT Title | text\nMC Question | right answer | wrong | wrong\nTF Statement | True   (or False)\nTYPE Question | answer | other accepted answer\nBANK The [missing] word goes in [brackets]. | decoy | decoy\nORDER Instruction | first | second | third\nMATCH Instruction | left = right | left = right\nSORT Instruction | Group: item, item | Group: item, item\nDOTMAP Question | Area, Area, Right area*\nDRAW Prompt\nCHECKIN Question\nLAUNCH wordbuilder | car/pet, har/vest | count\nLAUNCH boss | 8 questions | 45 seconds | easy\nLAUNCH dive | 8 questions | 45 seconds | 3 teams\nLAUNCH spinner | Prompt\nLAUNCH timer | 5 minutes\nHANDOUT Title | https://link\nNOTE Teacher note for the item above\nREAD Read-aloud text for the item above\nADVENTURE Title\n  …adventure script…\nEND ADVENTURE')),
+        el('pre', null, 'SLIDE Title | bullet | bullet\nBIG Word | small caption\nTEXT Title | text\nMC Question | right answer | wrong | wrong\nTF Statement | True   (or False)\nTYPE Question | answer | other accepted answer\nBANK The [missing] word goes in [brackets]. | decoy | decoy\nORDER Instruction | first | second | third\nMATCH Instruction | left = right | left = right\nSORT Instruction | Group: item, item | Group: item, item\nDOTMAP Question | Area, Area, Right area*\nDRAW Prompt\nCHECKIN Question\nLAUNCH wordbuilder | car/pet, har/vest | count\nLAUNCH boss | 8 questions | 45 seconds | easy\nLAUNCH dive | 8 questions | 45 seconds | 3 teams\nLAUNCH spinner | Prompt\nLAUNCH timer | 5 minutes\nHANDOUT Title | https://link\nNOTE Teacher note for the item above\nREAD Read-aloud text for the item above\nADVENTURE Title\n  …adventure script…\nEND ADVENTURE')),
       el('div', { class: 'spin-buttons' }, addBtn, el('button', { class: 'btn btn-ghost', onclick: () => { card.classList.remove('wide'); close(); } }, 'Cancel')));
   });
 }
 (function wirePaste() {
   const go = () => { const b = document.getElementById('bld-add-paste'); if (b && !b.dataset.wired) { b.dataset.wired = '1'; b.addEventListener('click', pasteModal); } };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go); else go();
+})();
+
+/* =====================================================================
+   32. SLIDE STYLES: your background, fonts and colors; a layout per text slide
+   A lesson's style lives on lesson.style; each text slide has a layout:
+   'auto' (title + bullets or text), 'pic' (title + picture), 'big' (big word), 'cols' (two columns)
+   ===================================================================== */
+const SS_FONTS = {
+  lexend: { label: 'Lexend (easy to read)', css: "'Lexend', system-ui, sans-serif" },
+  andika: { label: 'Andika (made for early readers)', css: "'Andika', 'Lexend', system-ui, sans-serif", g: 'Andika:wght@400;700' },
+  atkinson: { label: 'Atkinson Hyperlegible', css: "'Atkinson Hyperlegible', system-ui, sans-serif", g: 'Atkinson+Hyperlegible:wght@400;700' },
+  fredoka: { label: 'Fredoka (playful)', css: "'Fredoka', system-ui, sans-serif", g: 'Fredoka:wght@400;600' },
+  patrick: { label: 'Patrick Hand (handwritten)', css: "'Patrick Hand', 'Comic Sans MS', 'Chalkboard SE', system-ui, sans-serif", g: 'Patrick+Hand' },
+  georgia: { label: 'Georgia (classic)', css: "Georgia, 'Times New Roman', serif" }
+};
+const SS_THEMES = {
+  clean: { label: 'Clean', bgColor: '#FFFFFF', title: '#1E2B4A', text: '#1E2B4A', accent: '#E0622B', font: 'lexend' },
+  ocean: { label: 'Ocean', bgColor: '#E3F3FB', title: '#0B4F6C', text: '#123A4F', accent: '#1F8FBF', font: 'lexend' },
+  sunshine: { label: 'Sunshine', bgColor: '#FFF4D6', title: '#7A3E00', text: '#4A2A00', accent: '#E0622B', font: 'fredoka' },
+  forest: { label: 'Forest', bgColor: '#EAF4E4', title: '#1F5133', text: '#1E3A27', accent: '#3FA36B', font: 'andika' },
+  chalk: { label: 'Chalkboard', bgColor: '#24352E', title: '#FFFFFF', text: '#F2F2EC', accent: '#FFE08A', font: 'patrick' }
+};
+const SS_LAYOUTS = { auto: 'Title + text or bullets', pic: 'Title + picture', big: 'Big word', cols: 'Two columns' };
+function ssDefault() { return { theme: 'clean', bg: null, bgW: 0, bgH: 0, panel: false, ...SS_THEMES.clean }; }
+function ssStyle(lesson) { return Object.assign(ssDefault(), lesson && lesson.style ? lesson.style : {}); }
+function ssColor(c, d) { return /^#[0-9a-f]{6}$/i.test(c || '') ? c : d; }
+function ssLoadFont(key) {
+  const f = SS_FONTS[key]; if (!f || !f.g || document.getElementById('ssfont-' + key)) return;
+  document.head.append(el('link', { id: 'ssfont-' + key, rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=' + f.g + '&display=swap' }));
+}
+/* Public style for students: no blobs, just colors, font and the background's media id */
+function ssPublic(style, bgMid) {
+  return { bgMid: style.bg ? bgMid : null, bgColor: ssColor(style.bgColor, '#FFFFFF'), title: ssColor(style.title, '#1E2B4A'), text: ssColor(style.text, '#1E2B4A'),
+    accent: ssColor(style.accent, '#E0622B'), font: SS_FONTS[style.font] ? style.font : 'lexend', panel: !!style.panel };
+}
+/* Draw a styled 16:9 slide. d = { title, body, layout, picUrl }, st = public style, bgUrl = background picture url */
+function styledSlide(d, st, bgUrl) {
+  ssLoadFont(st.font);
+  const box = el('div', { class: 'sslide lay-' + (SS_LAYOUTS[d.layout] ? d.layout : 'auto') + (st.panel ? ' panel' : ''), role: 'img', 'aria-label': (d.title || 'Slide') });
+  box.style.setProperty('--ss-bg', st.bgColor); box.style.setProperty('--ss-title', st.title); box.style.setProperty('--ss-text', st.text);
+  box.style.setProperty('--ss-accent', st.accent); box.style.setProperty('--ss-font', (SS_FONTS[st.font] || SS_FONTS.lexend).css);
+  if (bgUrl) box.style.backgroundImage = 'url("' + bgUrl + '")';
+  const inner = el('div', { class: 'ss-inner' });
+  const lines = String(d.body || '').split('\n').map(x => x.trim()).filter(Boolean);
+  const textBlock = ls => {
+    const bul = ls.filter(x => /^[•\-*]\s*/.test(x));
+    if (bul.length && bul.length === ls.length) return el('ul', null, ls.map(x => el('li', { text: x.replace(/^[•\-*]\s*/, '') })));
+    return el('div', null, ls.map(x => /^[•\-*]\s*/.test(x) ? el('ul', null, el('li', { text: x.replace(/^[•\-*]\s*/, '') })) : el('p', { text: x })));
+  };
+  const layout = SS_LAYOUTS[d.layout] ? d.layout : 'auto';
+  if (layout === 'big') inner.append(el('div', { class: 'ss-big', text: d.title || '' }), lines.length ? el('div', { class: 'ss-sub', text: lines.join(' ') }) : null);
+  else {
+    if (d.title) inner.append(el('h2', { class: 'ss-title', text: d.title }));
+    if (layout === 'pic') inner.append(el('div', { class: 'ss-two' }, el('div', { class: 'ss-text' }, textBlock(lines)), el('div', { class: 'ss-pic' }, d.picUrl ? el('img', { src: d.picUrl, alt: '' }) : el('span', { class: 'ss-nopic' }, d.picMid ? 'Loading picture…' : 'Picture'))));
+    else if (layout === 'cols') {
+      const cut = lines.findIndex(x => x.replace(/^[•\-*]\s*/, '') === '---'), a = cut >= 0 ? lines.slice(0, cut) : lines.slice(0, Math.ceil(lines.length / 2)), b = cut >= 0 ? lines.slice(cut + 1) : lines.slice(Math.ceil(lines.length / 2));
+      inner.append(el('div', { class: 'ss-two' }, el('div', { class: 'ss-text' }, textBlock(a)), el('div', { class: 'ss-text' }, textBlock(b))));
+    } else inner.append(el('div', { class: 'ss-text' }, textBlock(lines)));
+  }
+  box.append(inner);
+  requestAnimationFrame(() => ssFit(box));
+  return box;
+}
+/* Shrink long text so it fits the slide (the size is kept in slide units, so it fits at every screen size) */
+function ssFit(box) {
+  const inner = box.querySelector('.ss-inner'); if (!inner || !box.isConnected) return;
+  let s = 1; box.style.setProperty('--ss-scale', '1'); box.classList.remove('ss-scroll');
+  for (let k = 0; k < 14 && inner.scrollHeight > inner.clientHeight + 2 && s > 0.36; k++) { s -= 0.05; box.style.setProperty('--ss-scale', s.toFixed(2)); }
+  if (inner.scrollHeight > inner.clientHeight + 2) box.classList.add('ss-scroll');   // still too much text: scroll inside the slide rather than cut it off
+}
+
+/* ---------- lesson builder: the style editor ---------- */
+function styleModal() {
+  const st = ssStyle(B.lesson); let bgUrl = st.bg ? URL.createObjectURL(st.bg) : null;
+  const sample = B.lesson.items.find(x => x.kind === 'text') || { title: 'What is a paragraph?', body: '• A group of sentences\n• All about one main idea', layout: 'auto' };
+  openModal((card, close) => {
+    card.classList.add('wide');
+    const prev = el('div', { class: 'ss-preview' });
+    const paint = () => { prev.replaceChildren(styledSlide({ title: sample.title || 'Title', body: sample.body || '', layout: sample.layout === 'pic' ? 'auto' : sample.layout }, ssPublic(st, 'x'), bgUrl)); };
+    const colorIn = (label, key) => { const i = el('input', { type: 'color', value: ssColor(st[key], '#000000'), 'aria-label': label }); i.addEventListener('input', () => { st[key] = i.value; paint(); }); return el('label', { class: 'ss-color' }, i, label); };
+    const font = el('select', { 'aria-label': 'Font' }, Object.entries(SS_FONTS).map(([k, f]) => el('option', { value: k }, f.label))); font.value = st.font;
+    font.addEventListener('change', () => { st.font = font.value; paint(); });
+    const panel = el('input', { type: 'checkbox' }); panel.checked = st.panel; panel.addEventListener('change', () => { st.panel = panel.checked; paint(); });
+    const controls = el('div', { class: 'ss-controls' });
+    const draw = () => {
+      controls.replaceChildren(
+        el('label', null, 'Start from a theme'),
+        el('div', { class: 'seg' }, Object.entries(SS_THEMES).map(([k, t]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(st.theme === k), onclick: () => { Object.assign(st, t, { theme: k }); font.value = st.font; draw(); paint(); } }, t.label))),
+        el('label', null, 'Background'),
+        el('div', { class: 'row-inline' },
+          fileButton(st.bg ? 'Change background picture' : 'Use my own background picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height); st.bg = r.blob; st.bgW = r.w; st.bgH = r.h; if (bgUrl) URL.revokeObjectURL(bgUrl); bgUrl = URL.createObjectURL(r.blob); draw(); paint(); } catch { toast('Could not read that picture.'); } }),
+          st.bg ? el('button', { class: 'btn btn-small', type: 'button', onclick: () => { st.bg = null; if (bgUrl) URL.revokeObjectURL(bgUrl); bgUrl = null; draw(); paint(); } }, 'Remove picture') : null,
+          colorIn('Background color', 'bgColor')),
+        el('p', { class: 'muted' }, 'Tip: make a blank slide in Google Slides or Canva with your design, download it as a picture (PNG), and use it here.'),
+        el('label', null, 'Font'), font,
+        el('div', { class: 'row-inline' }, colorIn('Titles', 'title'), colorIn('Text', 'text'), colorIn('Bullets', 'accent')),
+        el('label', { class: 'check small' }, panel, 'Put a soft panel behind the text (helps on busy backgrounds)'));
+    };
+    draw(); paint();
+    card.append(el('h2', null, '🎨 Slide style for this lesson'), el('p', { class: 'muted' }, 'Every text slide in this lesson uses this look. Picture slides you made elsewhere are not changed.'),
+      el('div', { class: 'ss-editor' }, controls, prev),
+      el('div', { class: 'spin-buttons' },
+        el('button', { class: 'btn btn-primary', onclick: () => { B.lesson.style = { ...st }; if (bgUrl) URL.revokeObjectURL(bgUrl); card.classList.remove('wide'); saveLessonSoon(); renderBuilder(); close(); toast('Slide style saved.'); } }, 'Save style'),
+        el('button', { class: 'btn btn-ghost', onclick: () => { if (bgUrl) URL.revokeObjectURL(bgUrl); card.classList.remove('wide'); close(); } }, 'Cancel')));
+  });
+}
+/* ---------- lesson builder: a text slide's thumbnail and controls ---------- */
+function ssThumb(it, blobUrl) {
+  const st = ssStyle(B.lesson);
+  const t = el('div', { class: 'thumb ss-thumb' });
+  t.append(styledSlide({ title: it.title || 'Untitled', body: it.body || '', layout: it.layout, picUrl: it.pic ? blobUrl(it.pic) : null }, ssPublic(st, 'x'), st.bg ? blobUrl(st.bg) : null));
+  return t;
+}
+function ssFields(it, blobUrl) {
+  const lay = el('select', { 'aria-label': 'Layout' }, Object.entries(SS_LAYOUTS).map(([k, l]) => el('option', { value: k }, l))); lay.value = SS_LAYOUTS[it.layout] ? it.layout : 'auto';
+  lay.addEventListener('change', () => { it.layout = lay.value; saveLessonSoon(); renderBuilder(); });
+  return el('div', { class: 'row-inline ss-fields' }, el('span', { class: 'muted' }, 'Layout:'), lay,
+    it.layout === 'pic' ? fileButton(it.pic ? 'Change picture' : 'Choose picture', 'image/*', async f => { try { const bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height, 900, 0.82); it.pic = r.blob; saveLessonSoon(); renderBuilder(); } catch { toast('Could not read that picture.'); } }) : null,
+    it.layout === 'cols' ? el('span', { class: 'muted' }, 'Tip: a line with --- splits the columns.') : null,
+    fileButton('🖼 Swap for a slide image', 'image/*,application/pdf', async f => {
+      try {
+        let bmp;
+        if (/pdf/.test(f.type)) { toast('Use a picture (PNG or JPG) of the slide, or add the PDF with Add slides.'); return; }
+        bmp = await createImageBitmap(f); const r = await toSlideBlob(bmp, bmp.width, bmp.height);
+        Object.assign(it, { kind: 'slide', blob: r.blob, w: r.w, h: r.h }); delete it.layout; delete it.pic;
+        saveLessonSoon(); renderBuilder(); toast('Swapped for your slide image. Notes, read-aloud and recordings were kept.');
+      } catch { toast('Could not read that picture.'); }
+    }));
+}
+
+/* =====================================================================
+   33. CLASS JOBS: students pick the timer sound, the confetti, the game music, or roll the dice
+   Picks come only from lists (never typing). Sounds and music are made in the browser.
+   ===================================================================== */
+const JOBS = {
+  timer: { icon: '⏱', name: 'Timer DJ', ask: 'Pick the sound for when the timer ends!' },
+  party: { icon: '🎉', name: 'Celebration Chief', ask: 'Pick the confetti for our next celebration!' },
+  dj: { icon: '🎵', name: 'Game DJ', ask: 'Pick the music for our game!' },
+  roller: { icon: '🎲', name: 'Dice Roller / Wheel Spinner', ask: '' }
+};
+const SOUNDS = { bell: '🔔 Bell', gong: '🔊 Gong', chimes: '🎐 Chimes', applause: '👏 Applause', boing: '🤸 Boing', drumroll: '🥁 Drumroll', tada: '🎺 Ta-da', whistle: '🪈 Slide whistle' };
+const CONFETTI = ['🎉', '⭐', '🦄', '🌮', '🚀', '🐙', '🍕', '🌈', '🦖', '💎', '🐬', '🍩'];
+const MUSIC = { spacehop: '🚀 Space Hop', ocean: '🌊 Ocean Groove', boss8: '👾 8-bit Boss Fight', jungle: '🌴 Jungle Beat', calm: '☁️ Calm Clouds' };
+
+/* ---------- sounds (made with the browser's audio, no files) ---------- */
+function audioCtx() { const A = window.AudioContext || window.webkitAudioContext; if (!A) return null; return audioCtx.c || (audioCtx.c = new A()); }
+function tone(a, t, f, d, type = 'sine', vol = 0.22, f2 = null) {
+  const o = a.createOscillator(), g = a.createGain(); o.type = type; o.frequency.setValueAtTime(f, t);
+  if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g).connect(a.destination); o.start(t); o.stop(t + d + 0.05);
+}
+function noise(a, t, d, vol = 0.2, hp = 800) {
+  const n = a.sampleRate * d, buf = a.createBuffer(1, n, a.sampleRate), ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) ch[i] = Math.random() * 2 - 1;
+  const s = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain(); s.buffer = buf; f.type = 'highpass'; f.frequency.value = hp;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  s.connect(f).connect(g).connect(a.destination); s.start(t);
+}
+function playSound(key) {
+  try {
+    const a = audioCtx(); if (!a) return; if (a.state === 'suspended') a.resume();
+    const t = a.currentTime + 0.02;
+    switch (key) {
+      case 'gong': [110, 220, 331, 452].forEach((f, i) => tone(a, t, f, 2.6 - i * 0.4, 'sine', 0.25 / (i + 1))); break;
+      case 'chimes': [1318, 1568, 1760, 2093, 1760].forEach((f, i) => tone(a, t + i * 0.13, f, 0.9, 'sine', 0.14)); break;
+      case 'applause': for (let i = 0; i < 26; i++) noise(a, t + Math.random() * 1.6, 0.06 + Math.random() * 0.05, 0.12 + Math.random() * 0.1, 1200); break;
+      case 'boing': tone(a, t, 180, 0.7, 'sine', 0.3, 520); tone(a, t + 0.05, 360, 0.5, 'triangle', 0.08, 900); break;
+      case 'drumroll': for (let i = 0; i < 22; i++) noise(a, t + i * 0.05, 0.05, 0.05 + i * 0.006, 300); noise(a, t + 1.15, 0.9, 0.3, 2500); tone(a, t + 1.15, 90, 0.4, 'sine', 0.3); break;
+      case 'tada': tone(a, t, 523, 0.18, 'sawtooth', 0.12); tone(a, t + 0.2, 784, 0.7, 'sawtooth', 0.14); tone(a, t + 0.2, 659, 0.7, 'square', 0.05); break;
+      case 'whistle': tone(a, t, 500, 0.9, 'sine', 0.2, 1800); break;
+      default: [880, 1046, 1318].forEach((f, i) => tone(a, t + i * 0.18, f, 0.4, 'sine', 0.25));   // bell
+    }
+  } catch { /* sound is optional */ }
+}
+/* ---------- music: short original loops, played by a tiny step sequencer ---------- */
+const MUSIC_DATA = {
+  spacehop: { bpm: 124, wave: 'square', bass: [110, 110, 147, 131], mel: [440, 0, 523, 659, 0, 587, 523, 0, 440, 0, 392, 440, 0, 523, 0, 0] },
+  ocean: { bpm: 92, wave: 'sine', bass: [98, 131, 110, 87], mel: [392, 0, 494, 0, 587, 0, 494, 0, 440, 0, 523, 0, 659, 0, 587, 0] },
+  boss8: { bpm: 150, wave: 'square', bass: [82, 82, 98, 73], mel: [330, 330, 392, 330, 466, 440, 392, 0, 330, 330, 392, 330, 523, 494, 392, 0] },
+  jungle: { bpm: 112, wave: 'triangle', bass: [131, 147, 165, 147], mel: [523, 0, 659, 523, 0, 784, 659, 0, 587, 0, 698, 587, 0, 880, 784, 0] },
+  calm: { bpm: 72, wave: 'sine', bass: [131, 110, 87, 98], mel: [523, 0, 0, 659, 0, 0, 587, 0, 0, 523, 0, 0, 494, 0, 0, 0] }
+};
+const Music = { timer: null, step: 0, track: null, next: 0 };
+function musicPlay(track) {
+  musicStop(); const a = audioCtx(), d = MUSIC_DATA[track]; if (!a || !d) return;
+  if (a.state === 'suspended') a.resume();
+  Music.track = track; Music.step = 0; Music.next = a.currentTime + 0.1;
+  const s16 = 60 / d.bpm / 4;
+  Music.timer = setInterval(() => {
+    while (Music.next < a.currentTime + 0.25) {
+      const i = Music.step % 16, t = Music.next;
+      const f = d.mel[i]; if (f) tone(a, t, f, s16 * 1.8, d.wave, 0.045);
+      if (i % 4 === 0) tone(a, t, d.bass[(Music.step / 16 | 0) % 4], s16 * 3.5, 'triangle', 0.08);
+      if (i % 4 === 2) noise(a, t, 0.03, 0.03, 5000);
+      if (i % 8 === 4) noise(a, t, 0.08, 0.05, 1200);
+      Music.step++; Music.next += s16;
+    }
+  }, 60);
+}
+function musicStop() { clearInterval(Music.timer); Music.timer = null; Music.track = null; }
+
+/* ---------- emoji confetti on every screen ---------- */
+function emojiConfetti(e) {
+  if (!CONFETTI.includes(e)) e = '🎉';
+  const box = el('div', { class: 'emoji-rain', 'aria-hidden': 'true' });
+  if (reduceMotion()) box.append(el('span', { class: 'emoji-pop' }, e));
+  else for (let i = 0; i < 36; i++) { const s = el('span', { class: 'emoji-drop' }, e); s.style.left = rand(96) + '%'; s.style.animationDelay = (rand(900) / 1000) + 's'; s.style.fontSize = (1.4 + rand(18) / 10) + 'rem'; box.append(s); }
+  document.body.append(box); setTimeout(() => box.remove(), 3600);
+}
+
+/* ---------- teacher ---------- */
+function jobsDefault() { return { on: { timer: true, party: true, dj: true, roller: true }, credit: 'name', music: 'teacher', had: {}, picks: { timer: 'bell', party: '🎉', dj: 'spacehop' }, holder: {} }; }
+function J() { return H.jobs || (H.jobs = jobsDefault()); }
+function firstName(st) { return (st.name || '').replace(/\s\(\d+\)$/, '').split(' ')[0]; }
+function jobPickStudent(job) {
+  const j = J(), busy = new Set(Object.values(j.pending || {}).map(p => p.sid));
+  const pool = onlineStudents().filter(s => !busy.has(s.id)); if (!pool.length) return null;
+  const min = Math.min(...pool.map(s => j.had[s.id] || 0));
+  const pick = shuffle(pool.filter(s => (j.had[s.id] || 0) === min))[0];
+  return pick;
+}
+function jobOffer(job, st, extra) {
+  const j = J(); if (!st) return false;
+  j.pending = j.pending || {}; j.had[st.id] = (j.had[st.id] || 0) + 1; j.holder[job] = st.id;
+  const options = job === 'timer' ? Object.entries(SOUNDS) : job === 'party' ? CONFETTI.map(e => [e, e]) : job === 'dj' ? Object.entries(MUSIC) : null;
+  const secs = job === 'roller' ? 30 : 20;
+  j.pending[job] = { sid: st.id, until: Date.now() + secs * 1000 };
+  send(st, { t: 'job', job, options, secs, kind: extra && extra.kind });
+  clearTimeout(j['t_' + job]);
+  j['t_' + job] = setTimeout(() => jobTimeout(job), secs * 1000 + 500);
+  toast(JOBS[job].icon + ' ' + JOBS[job].name + ': ' + st.name);
+  renderTools(); saveHostSnap();
+  return true;
+}
+function jobTimeout(job) {
+  const j = J(), p = (j.pending || {})[job]; if (!p) return;
+  delete j.pending[job];
+  const st = H.students.get(p.sid); if (st && st.online) send(st, { t: 'job', off: 1 });
+  if (job === 'roller') { toast('The roll went back to you.'); renderTools(); return; }
+  const opts = job === 'timer' ? Object.keys(SOUNDS) : job === 'party' ? CONFETTI : Object.keys(MUSIC);
+  jobApply(job, opts[rand(opts.length)], null);
+}
+function jobApply(job, choice, st) {
+  const j = J(); j.picks[job] = choice;
+  const label = job === 'timer' ? SOUNDS[choice] : job === 'party' ? choice : MUSIC[choice];
+  const by = st ? (j.credit === 'name' ? ' (picked by ' + firstName(st) + ')' : j.credit === 'anon' ? ' (picked by a classmate)' : '') : ' (Sidekick picked)';
+  const text = JOBS[job].icon + ' ' + { timer: 'Timer sound: ', party: 'Our confetti: ', dj: 'Game music: ' }[job] + label + by;
+  if (j.credit !== 'off' || !st) broadcast({ t: 'jobsay', text }); toast(text);
+  if (job === 'dj' && ((H.boss && H.boss.active) || (H.race && H.race.active))) musicStart();
+  renderTools(); saveHostSnap();
+}
+function jobPick(st, m) {
+  const j = J(), p = (j.pending || {})[m.job];
+  if (!p || p.sid !== st.id) return;
+  if (m.job === 'roller') return;
+  const ok = m.job === 'timer' ? SOUNDS[m.choice] : m.job === 'party' ? CONFETTI.includes(m.choice) : MUSIC[m.choice];
+  if (!ok) return;
+  clearTimeout(j['t_' + m.job]); delete j.pending[m.job];
+  jobApply(m.job, m.choice, st);
+}
+function jobRoll(st, m) {
+  const j = J(), p = (j.pending || {}).roller;
+  if (!p || p.sid !== st.id) return;
+  clearTimeout(j.t_roller); delete j.pending.roller;
+  const kind = p.kind || m.kind;
+  if (kind === 'wheel') { openTools('wheel'); const vis = $('#wheel-host'), res = $('#wheel-res'); if (vis && res) spinWheel(vis, res); }
+  else { openTools('dice'); const vis = $('#dice-host'); if (vis) rollDice(vis); }
+  const by = j.credit === 'name' ? firstName(st) : j.credit === 'anon' ? 'a classmate' : '';
+  if (by) broadcast({ t: 'jobsay', text: (kind === 'wheel' ? '🎡 Spun by ' : '🎲 Rolled by ') + by });
+}
+function jobsGiveRoll(kind) {
+  const st = jobPickStudent('roller'); if (!st) { toast('No students are connected.'); return; }
+  jobOffer('roller', st, { kind }); J().pending.roller.kind = kind;
+}
+function jobsOnTimerStart() { const j = J(); if (j.on.timer) jobOffer('timer', jobPickStudent('timer')); if (j.on.party) jobOffer('party', jobPickStudent('party')); }
+function jobsOnGameStart() { const j = J(); if (j.on.dj) jobOffer('dj', jobPickStudent('dj')); else if (j.music !== 'off') musicStart(); if (j.on.party) jobOffer('party', jobPickStudent('party')); }
+function jobsParty() { const e = J().picks.party || '🎉'; broadcast({ t: 'party', e }); emojiConfetti(e); }
+function musicStart() {
+  const j = J(), track = j.picks.dj || 'spacehop';
+  if (j.music === 'off') return;
+  if (j.music === 'everyone') { broadcast({ t: 'music', track }); musicStop(); } else { musicPlay(track); broadcast({ t: 'music', off: 1 }); }
+}
+function musicEnd() { musicStop(); broadcast({ t: 'music', off: 1 }); }
+function toolJobs(body) {
+  const j = J(), name = id => (H.students.get(id) || {}).name || '—';
+  const rows = el('div', { class: 'jobs-list' }, Object.entries(JOBS).map(([k, d]) => {
+    const on = el('input', { type: 'checkbox' }); on.checked = !!j.on[k];
+    on.addEventListener('change', () => { j.on[k] = on.checked; saveHostSnap(); });
+    const pend = (j.pending || {})[k];
+    const assign = el('select', { 'aria-label': 'Give ' + d.name + ' to' }, el('option', { value: '' }, 'Give it to…'), onlineStudents().sort((a, b) => naturalSort(a.name, b.name)).map(s => el('option', { value: s.id }, s.name)));
+    assign.addEventListener('change', () => { const st = H.students.get(assign.value); if (!st) return; if (k === 'roller') { jobOffer('roller', st, { kind: 'dice' }); J().pending.roller.kind = 'dice'; } else jobOffer(k, st); });
+    const cur = k === 'timer' ? SOUNDS[j.picks.timer] : k === 'party' ? j.picks.party : k === 'dj' ? MUSIC[j.picks.dj] : '';
+    return el('div', { class: 'job-row' },
+      el('label', { class: 'check' }, on, el('strong', null, d.icon + ' ' + d.name)),
+      el('span', { class: 'muted' }, pend ? '⏳ ' + name(pend.sid) + ' is choosing…' : cur ? 'Now: ' + cur : (k === 'roller' ? 'Use “Let a student roll” on the Dice or Wheel tab' : '')),
+      k === 'roller' ? null : el('span', { class: 'row-inline' }, assign, k !== 'roller' ? el('button', { class: 'btn btn-small', onclick: () => jobOffer(k, jobPickStudent(k)) }, '🎲 Pick someone') : null,
+        k === 'timer' ? el('button', { class: 'btn btn-small', onclick: () => playSound(j.picks.timer) }, '🔊 Hear it') : null,
+        k === 'party' ? el('button', { class: 'btn btn-small', onclick: jobsParty }, '🎉 Try it now') : null));
+  }));
+  const credit = el('select', { 'aria-label': 'Credit' }, [['name', 'Show the student’s first name'], ['anon', 'Say “a classmate”'], ['off', 'Don’t announce picks']].map(([v, t]) => el('option', { value: v }, t))); credit.value = j.credit;
+  credit.addEventListener('change', () => { j.credit = credit.value; saveHostSnap(); });
+  const music = el('select', { 'aria-label': 'Where music plays' }, [['teacher', 'On my computer (share sound in LL)'], ['everyone', 'On every student’s device'], ['off', 'No game music']].map(([v, t]) => el('option', { value: v }, t))); music.value = j.music;
+  music.addEventListener('change', () => { j.music = music.value; saveHostSnap(); if ((H.boss && H.boss.active) || (H.race && H.race.active)) musicStart(); });
+  const turns = onlineStudents().filter(s => j.had[s.id]).length;
+  body.append(el('p', { class: 'muted' }, 'Jobs are handed out automatically: the Timer DJ and Celebration Chief when you start a timer, the Game DJ when a game starts. Everyone gets a turn before anyone repeats.'),
+    rows, el('label', null, 'Announce picks'), credit, el('label', null, 'Game music plays'), music,
+    el('div', { class: 'spin-buttons' }, Music.track ? el('button', { class: 'btn', onclick: musicEnd }, '⏹ Stop music') : el('button', { class: 'btn', onclick: () => { musicPlay(j.picks.dj || 'spacehop'); renderTools(); } }, '🔊 Hear the music')),
+    el('p', { class: 'muted' }, turns + ' of ' + onlineStudents().length + ' students have had a job this session.'));
+}
+
+/* ---------- student ---------- */
+function onJobCard(m) {
+  const ov = $('#job-card');
+  clearInterval(S.jobT);
+  if (m.off) { ov.hidden = true; ov.replaceChildren(); return; }
+  const d = JOBS[m.job]; if (!d) return;
+  const end = Date.now() + (m.secs || 20) * 1000;
+  const time = el('span', { class: 'timer-pill' });
+  const tick = () => { const s = Math.max(0, Math.ceil((end - Date.now()) / 1000)); time.textContent = '⏱ ' + s + 's'; if (s <= 0) { clearInterval(S.jobT); ov.hidden = true; } };
+  const done = msg => { clearInterval(S.jobT); ov.replaceChildren(el('div', { class: 'job-inner' }, el('div', { class: 'big-emoji' }, '✓'), el('p', { class: 'q-text' }, msg))); setTimeout(() => { ov.hidden = true; }, 1400); };
+  const inner = el('div', { class: 'job-inner', role: 'dialog', 'aria-label': d.name });
+  if (m.job === 'roller') {
+    inner.append(el('div', { class: 'big-emoji' }, m.kind === 'wheel' ? '🎡' : '🎲'), el('h2', null, 'You get to ' + (m.kind === 'wheel' ? 'spin the wheel!' : 'roll the dice!')), time,
+      el('button', { class: 'btn btn-sun job-go', type: 'button', onclick: () => { sendHost({ t: 'jobroll', kind: m.kind }); done(m.kind === 'wheel' ? 'Spinning!' : 'Rolling!'); } }, m.kind === 'wheel' ? '🎡 Spin!' : '🎲 Roll!'));
+  } else {
+    const grid = el('div', { class: 'job-grid' + (m.job === 'party' ? ' emoji' : '') });
+    (m.options || []).forEach(([k, label]) => grid.append(el('button', { class: 'job-opt', type: 'button', onclick: () => {
+      if (m.job === 'timer') playSound(k);
+      sendHost({ t: 'jobpick', job: m.job, choice: k }); done('Great pick! ' + label);
+    } }, label)));
+    inner.append(el('div', { class: 'big-emoji' }, d.icon), el('h2', null, 'You’re the ' + d.name + '!'), el('p', null, d.ask), time, grid);
+  }
+  ov.replaceChildren(inner); ov.hidden = false; tick(); S.jobT = setInterval(tick, 250);
+}
+function onMusicMsg(m) {
+  const b = $('#st-mute');
+  if (m.off) { musicStop(); b.hidden = true; return; }
+  S.musicTrack = m.track; b.hidden = false; b.textContent = S.musicMuted ? '🔇 Music off' : '🔊 Music on';
+  if (!S.musicMuted) musicPlay(m.track);
+}
+function toggleMusicMute() {
+  S.musicMuted = !S.musicMuted; const b = $('#st-mute');
+  b.textContent = S.musicMuted ? '🔇 Music off' : '🔊 Music on'; b.setAttribute('aria-pressed', String(!S.musicMuted));
+  if (S.musicMuted) musicStop(); else if (S.musicTrack) musicPlay(S.musicTrack);
+}
+
+(function wireJobs() {
+  const go = () => { const b = document.getElementById('st-mute'); if (b && !b.dataset.wired) { b.dataset.wired = '1'; b.addEventListener('click', toggleMusicMute); } };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go); else go();
 })();

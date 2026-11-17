@@ -53,6 +53,7 @@
     <span id="st-score" class="score-pill" hidden></span>
     <span id="st-stars" class="stars" title="Class stars" aria-live="polite"></span>
     <button id="st-handouts" class="btn btn-small" hidden>📄 Handouts</button>
+    <button id="st-mute" class="btn btn-small" hidden aria-pressed="true">🔊 Music on</button>
   </header>
   <div id="st-help" class="st-help" role="status" hidden></div>
   <section id="st-game" class="st-game" hidden></section>
@@ -116,6 +117,7 @@
     <button class="btn" id="bld-add-handout">📄 Add handout</button>
     <button class="btn" id="bld-add-adv">🗺️ Add adventure</button>
     <button class="btn btn-sun" id="bld-add-paste">📋 Paste from Notebook</button>
+    <button class="btn" id="bld-style">🎨 Slide style</button>
     <span id="bld-status" class="muted" aria-live="polite"></span>
   </div>
   <ol id="bld-list" class="bld-list"></ol>
@@ -241,6 +243,7 @@
       <button class="tab" role="tab" data-tool="dice">🎲 Dice</button>
       <button class="tab" role="tab" data-tool="score">🏆 Scoreboard</button>
       <button class="tab" role="tab" data-tool="wheel">🎡 Random wheel</button>
+      <button class="tab" role="tab" data-tool="jobs">🎭 Jobs</button>
     </nav>
     <div id="tools-body" class="tools-body"></div>
   </div>
@@ -275,5 +278,6 @@
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="script.js"></script>
+<div id="job-card" class="job-card" hidden></div>
 </body>
 </html>

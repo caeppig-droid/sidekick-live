@@ -635,3 +635,55 @@ body.safe .roster .rname, body.safe .spin-pool .pname, body.safe .spot-list .sna
 .paste-tools { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .paste-row textarea { flex: 1; }
 .paste-sum { font-weight: 700; margin: 8px 0 0; }
+
+/* slide styles: a 16:9 slide that scales with its width */
+.sslide { --ss-scale: 1; container-type: inline-size; aspect-ratio: 16 / 9; width: min(100%, 960px); margin: 0 auto; border-radius: var(--radius-lg); overflow: hidden; position: relative;
+  background-color: var(--ss-bg); background-size: cover; background-position: center; color: var(--ss-text); font-family: var(--ss-font); box-shadow: 0 2px 10px rgba(30,43,74,.12); border: 1px solid var(--line); }
+.sslide .ss-inner { position: absolute; inset: 0; padding: 6cqw 7cqw; display: flex; flex-direction: column; gap: calc(2cqw * var(--ss-scale)); overflow: hidden; }
+.sslide.panel .ss-inner { inset: 3cqw; padding: 4cqw 5cqw; background: var(--ss-bg); background: color-mix(in srgb, var(--ss-bg) 82%, transparent); border-radius: 2cqw; }
+.sslide .ss-title { margin: 0; color: var(--ss-title); font-size: calc(5.4cqw * var(--ss-scale)); line-height: 1.15; font-weight: 800; }
+.sslide .ss-text { font-size: calc(3.2cqw * var(--ss-scale)); line-height: 1.35; min-width: 0; }
+.sslide .ss-text p { margin: 0 0 1.2cqw; }
+.sslide ul { margin: 0; padding-left: 1.2em; }
+.sslide li { margin: 0 0 1.2cqw; }
+.sslide li::marker { color: var(--ss-accent); }
+.sslide .ss-two { display: grid; grid-template-columns: 1fr 1fr; gap: 4cqw; flex: 1; min-height: 0; }
+.sslide .ss-pic { display: flex; align-items: center; justify-content: center; min-height: 0; }
+.sslide .ss-pic img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 1.5cqw; }
+.sslide .ss-nopic { border: 0.4cqw dashed var(--ss-accent); border-radius: 1.5cqw; padding: 6cqw; font-size: 2.4cqw; opacity: .7; }
+.sslide.lay-big .ss-inner { justify-content: center; align-items: center; text-align: center; }
+.sslide .ss-big { color: var(--ss-title); font-size: calc(13cqw * var(--ss-scale)); font-weight: 800; line-height: 1.05; overflow-wrap: anywhere; }
+.sslide .ss-sub { font-size: calc(3.6cqw * var(--ss-scale)); color: var(--ss-text); }
+.thumb.ss-thumb { padding: 0; background: none; border: none; display: block; }
+.thumb.ss-thumb .sslide { width: 100%; border-radius: 8px; box-shadow: none; }
+.ss-editor { display: grid; grid-template-columns: minmax(16em, 1fr) 1.3fr; gap: 16px; align-items: start; }
+@media (max-width: 760px) { .ss-editor { grid-template-columns: 1fr; } }
+.ss-controls { display: grid; gap: 6px; }
+.ss-controls label { margin: 6px 0 0; }
+.ss-color { display: inline-flex; align-items: center; gap: 6px; margin: 0 10px 0 0; font-weight: 600; }
+.ss-color input { width: 40px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 6px; }
+.ss-preview { position: sticky; top: 0; }
+.ss-fields select { width: auto; }
+
+.sslide.ss-scroll .ss-inner { overflow-y: auto; }
+
+/* class jobs */
+.job-card { position: fixed; inset: 0; z-index: 120; background: rgba(30,43,74,.45); display: grid; place-items: center; padding: 16px; }
+.job-card[hidden] { display: none; }
+.job-inner { background: var(--card); border-radius: var(--radius-lg); padding: 20px 22px; max-width: 34em; width: 100%; text-align: center; display: grid; gap: 10px; justify-items: center; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+.job-inner h2 { margin: 0; }
+.job-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9em, 1fr)); gap: 8px; width: 100%; }
+.job-grid.emoji { grid-template-columns: repeat(auto-fill, minmax(4.2em, 1fr)); }
+.job-opt { font: inherit; font-weight: 700; min-height: 56px; border-radius: var(--radius); border: 3px solid var(--line); background: #fff; color: var(--ink); cursor: pointer; padding: 6px 10px; }
+.job-grid.emoji .job-opt { font-size: 2rem; }
+.job-opt:hover, .job-opt:focus-visible { border-color: var(--ink); background: #FFF4D6; }
+.job-go { font-size: 1.6rem; min-height: 72px; padding: .3em 1.6em; }
+.emoji-rain { position: fixed; inset: 0; pointer-events: none; z-index: 130; overflow: hidden; }
+.emoji-drop { position: absolute; top: -3rem; animation: emojiFall 2.8s ease-in forwards; }
+@keyframes emojiFall { to { transform: translateY(110vh) rotate(360deg); } }
+.emoji-pop { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); font-size: 5rem; }
+.jobs-list { display: grid; gap: 8px; margin: 8px 0; }
+.job-row { display: grid; gap: 4px; background: var(--paper); border-radius: 10px; padding: 8px 10px; }
+.job-row .check { margin: 0; }
+.job-row select { width: auto; }
+.job-inner .big-emoji { font-size: 3.2rem; line-height: 1; }
